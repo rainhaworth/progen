@@ -79,6 +79,8 @@ def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2):
     # generate artificial binding site position
     sz = np.random.poisson(exp_sz)
     keep_idx = np.random.random(sz) > p_drop
+    if np.sum(keep_idx) == 0:
+        keep_idx[0] = True
     start = np.random.randint(0, seqlen-sz)
     idx = np.arange(start, start+sz)[keep_idx]
     
