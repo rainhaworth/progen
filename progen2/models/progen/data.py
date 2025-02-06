@@ -14,12 +14,15 @@ class ProteinBindingData(Dataset):
 
         # for now, only support random bindings
         with open(fasta_file) as f:
+            seq = ''
             for line in f:
                 if len(line) == 0 or line[0] == '>':
-                    continue
-                self.seqs.append(tokenizer.encode(line).ids)
-                self.attns.append(None)
-                self.offsets.append(None)
+                    if seq == '':
+                        continue
+                    self.seqs.append(tokenizer.encode(seq).ids)
+                    self.attns.append(None)
+                    self.offsets.append(None)
+                seq += line.strip()
 
         def __len__(self):
             return len(self.offsets)
