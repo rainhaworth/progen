@@ -11,6 +11,7 @@ class ProteinBindingData(Dataset):
         self.seqs = []
         self.attns = []
         self.offsets = []
+        self.targets = []
 
         # for now, only support random bindings
         with open(fasta_file) as f:
@@ -18,10 +19,10 @@ class ProteinBindingData(Dataset):
             it = 0
             for line in f:
                 it += 1
-                if it > 1000:
+                if it > 101:
                     break
                 if len(line) == 0 or line[0] == '>':
-                    if seq == '':
+                    if len(seq) == 0:
                         continue
                     seq = seq[:max_dim]
                     # tokenize
@@ -29,14 +30,16 @@ class ProteinBindingData(Dataset):
                     # pad
                     if len(seq) < max_dim:
                         seq = seq + [0] * (max_dim - len(seq))
-                    # write
+                    # store
                     self.seqs.append(torch.tensor(seq))
                     self.attns.append(None)
                     self.offsets.append(None)
+                    self.targets.append(None)
                     
                     # reset
                     seq = ''
                 seq += line.strip()
+
 
     def __len__(self):
         return len(self.offsets)
@@ -48,7 +51,12 @@ class ProteinBindingData(Dataset):
         if self.attns[idx] is not None:
             attn = self.attns[idx]
             offset = self.offsets[idx]
+            targets = self.targets[idx]
         else:
-            attn, offset = rand_mask_start(len(seq))
+            attn, offset, targets = rand_mask_start(len(seq))
 
-        return seq, attn, offset
+        # convert targets from indices to token ids
+        targets = torch.tensor(targets)
+        targets = torch.where(targets >= 0, seq[targets], targets)
+
+        return seq, attn, offset, targets

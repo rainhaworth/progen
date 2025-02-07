@@ -71,15 +71,25 @@ def path_to_mask(path, idx, dim=512):
     return mask
 
 # from known indices and sequence length, generate mask and return binding site start position
+# new: also generate targets
 def idx_to_mask_start(idx, seqlen, dim=512):
     path = idx_to_path(idx, seqlen)
     mask = path_to_mask(path, idx, dim)
-    return mask, np.min(idx)
+
+    # default: ignore all
+    targets = np.ones(seqlen, dtype=int)
+    targets *= -100 
+    # set targets from path; note that we have to convert from indices in seq to token ids later
+    targets[idx] = path[0]
+    for i in range(len(path)-1):
+        targets[path[i]] = path[i-1]
+
+    return mask, np.min(idx), targets
 
 # generate random path through sequence of known length
 def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2):
     # generate artificial binding site position
-    sz = np.random.poisson(exp_sz)
+    sz = max(1, np.random.poisson(exp_sz))
     keep_idx = np.random.random(sz) > p_drop
     if np.sum(keep_idx) == 0:
         keep_idx[0] = True

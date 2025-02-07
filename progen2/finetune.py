@@ -185,7 +185,7 @@ def main():
     # (4) configure training
 
     # default settings from https://huggingface.co/docs/transformers/v4.46.2/en/training
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-7)
     num_epochs = 3
     num_training_steps = num_epochs * len(train_dataloader)
 
@@ -203,25 +203,28 @@ def main():
 
     model.train()
     for epoch in range(num_epochs):
-        for seqs, attns, offsets in train_dataloader:
-            print('seqs:', seqs.shape)
-            print('attns:', attns.shape)
-            print('offsets:', offsets.shape)
+        print('epoch', epoch)
+        for seqs, attns, offsets, targets in train_dataloader:
+            #print('seqs:', seqs.shape)
+            #print('attns:', attns.shape)
+            #print('offsets:', offsets.shape)
             seqs = seqs.to(device)
             attns = attns.to(device)
             offsets = offsets.to(device)
+            targets = targets.to(device)
 
             logits = model(seqs,
                             attention_mask=attns,
                             pos_offsets=offsets).logits
             
-            print(logits.shape)
-
-            # TODO: fix
-            logits = logits[:-1, ...]
-            target = logits[1:]
+            # convert targets from idx to token id
+            #print(targets.shape)
+            #print(seqs.shape)
+            #targets = torch.where(targets >= 0, seqs[targets], targets)
             
-            loss = cross_entropy(logits, target)
+            # squish logits + targets and get CE
+            loss = cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            print('loss:', loss)
             loss.backward()
 
             optimizer.step()

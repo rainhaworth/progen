@@ -212,8 +212,10 @@ class ProGenAttention(nn.Module):
         """
         # no RoPE for now
         sincos = adj_fixed_pos_embedding(key, 1, seq_len, pos_offsets)
-        # TODO: interleave instead of stack
-        sincos = torch.cat(sincos, -1)[:,:,None,:]
+        # interleave sin and cos + add dim
+        sincos = torch.stack(list(sincos), dim=-1)
+        sincos = torch.flatten(sincos, start_dim=-2)
+        sincos = sincos[:,:,None,:]
         #print('shapes (key, sincos):', key.shape, sincos.shape)
         key = key + sincos
         query = query + sincos 
@@ -676,6 +678,8 @@ class ProGenForCausalLM(ProGenPreTrainedModel):
         )
         hidden_states = transformer_outputs[0]
 
+        #print('transformer out:', hidden_states.shape)
+
         # Set device for model parallelism
         if self.model_parallel:
             torch.cuda.set_device(self.transformer.first_device)
@@ -685,6 +689,8 @@ class ProGenForCausalLM(ProGenPreTrainedModel):
         # compute loss in fp32 to match with mesh-tf version
         # https://github.com/EleutherAI/gpt-neo/blob/89ce74164da2fb16179106f54e2269b5da8db333/models/gpt2/gpt2.py#L179
         lm_logits = self.lm_head(hidden_states).to(torch.float32)
+
+        #print('lm logits:', lm_logits.shape)
 
         loss = None
         if labels is not None:
