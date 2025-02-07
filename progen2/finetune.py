@@ -119,7 +119,7 @@ def main():
     # (1) params
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, choices=models, default='progen2-large')
+    parser.add_argument('--model', type=str, choices=models, default='progen2-small')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
@@ -130,8 +130,9 @@ def main():
     parser.add_argument('--fp16', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--context', type=str, default='1')
     parser.add_argument('--sanity', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--train', type=str, default='data.fa')
+    parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
+    parser.add_argument('--save', type=str, default='./weights')
     args = parser.parse_args()
 
 
@@ -161,10 +162,25 @@ def main():
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
 
     # load dataset(s)
-    train_dataloader = ProteinBindingData(args.train, tokenizer)
-    eval_dataloader = None
-    if args.eval != '':
-        eval_dataloader = ProteinBindingData(args.eval, tokenizer)
+    
+    # helper function; keep it small and simple for now
+    def make_dataloader(dataset):
+        return torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+
+    with print_time('loading datasets'):
+        train_dataset = ProteinBindingData(args.train, tokenizer)
+        train_dataloader = make_dataloader(train_dataset)
+
+        eval_dataloader = None
+        if args.eval != '':
+            eval_dataset = ProteinBindingData(args.eval, tokenizer)
+            eval_dataloader = make_dataloader(eval_dataset)
+
+    print('train samples found:', len(train_dataset))
+
+    #print('first training sample:', train_dataset[0])
+
+    #print('second training sample:', train_dataset[1])
 
     # (4) configure training
 
@@ -181,11 +197,16 @@ def main():
 
     # (5) train
 
+    print('training')
+
     # TODO: pass in masks + posemb stuff, fix logit/target stuff below
 
     model.train()
     for epoch in range(num_epochs):
         for seqs, attns, offsets in train_dataloader:
+            print('seqs:', seqs.shape)
+            print('attns:', attns.shape)
+            print('offsets:', offsets.shape)
             seqs = seqs.to(device)
             attns = attns.to(device)
             offsets = offsets.to(device)
@@ -194,9 +215,11 @@ def main():
                             attention_mask=attns,
                             pos_offsets=offsets).logits
             
+            print(logits.shape)
+
             # TODO: fix
             logits = logits[:-1, ...]
-            target = target[1:]
+            target = logits[1:]
             
             loss = cross_entropy(logits, target)
             loss.backward()
@@ -205,6 +228,9 @@ def main():
             lr_scheduler.step()
             optimizer.zero_grad()
             
+    # (6) save weights
+
+    #torch.save(model, os.path.join(args.save, 'model.pt')
 
 
 if __name__ == '__main__':

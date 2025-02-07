@@ -43,9 +43,9 @@ def adj_fixed_pos_embedding(x, seq_dim=1, seq_len=None, offset=None):
         offset = torch.zeros(x.shape[0])
     # TODO: unit test
     inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim))
-    sinusoid_inp = torch.einsum("i , j -> i j", 
-        torch.arange(seq_len)[None,:] - offset, 
-        inv_freq).to(x.device).float()
+    sinusoid_inp = torch.einsum("bi,j->bij", 
+        torch.arange(seq_len)[None,:].to(x.device) - offset[:,None], 
+        inv_freq.to(x.device)).float()
     return torch.sin(sinusoid_inp), torch.cos(sinusoid_inp)
 
 
@@ -142,6 +142,8 @@ class ProGenAttention(nn.Module):
         attn_weights = attn_weights / self.scale_attn
         #attn_weights = torch.where(causal_mask, attn_weights, self.masked_bias.to(attn_weights.dtype))
 
+        #print('attn weights, mask shapes:', attn_weights.shape, attention_mask.shape)
+
         if attention_mask is not None:
             # Apply the attention mask
             attn_weights = attn_weights + attention_mask
@@ -210,6 +212,9 @@ class ProGenAttention(nn.Module):
         """
         # no RoPE for now
         sincos = adj_fixed_pos_embedding(key, 1, seq_len, pos_offsets)
+        # TODO: interleave instead of stack
+        sincos = torch.cat(sincos, -1)[:,:,None,:]
+        #print('shapes (key, sincos):', key.shape, sincos.shape)
         key = key + sincos
         query = query + sincos 
 
@@ -441,15 +446,18 @@ class ProGenModel(ProGenPreTrainedModel):
             position_ids = position_ids.unsqueeze(0).view(-1, input_shape[-1])
 
         # Attention mask.
+        # changed this; TODO: make sure i haven't broken something important
         if attention_mask is not None:
-            assert batch_size > 0, "batch_size has to be defined and > 0"
-            attention_mask = attention_mask.view(batch_size, -1)
+            #assert batch_size > 0, "batch_size has to be defined and > 0"
+            #attention_mask = attention_mask.view(batch_size, -1)
+            
             # We create a 3D attention mask from a 2D tensor mask.
             # Sizes are [batch_size, 1, 1, to_seq_length]
             # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
             # this attention mask is more simple than the triangular masking of causal attention
             # used in OpenAI GPT, we just need to prepare the broadcast dimension here.
-            attention_mask = attention_mask[:, None, None, :]
+            #attention_mask = attention_mask[:, None, None, :]
+            attention_mask = attention_mask[:, None, :, :]
 
             # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
             # masked positions, this operation will create a tensor which is 0.0 for
@@ -458,7 +466,7 @@ class ProGenModel(ProGenPreTrainedModel):
             # effectively the same as removing these entirely.
             attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
             attention_mask = (1.0 - attention_mask) * -10000.0
-
+        
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x num_attention_heads x N x N

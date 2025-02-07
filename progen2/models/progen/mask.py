@@ -68,6 +68,8 @@ def path_to_mask(path, idx, dim=512):
         populated_idxs = path[path_idx:]
         mask[populated_idxs, step] = 1
 
+    return mask
+
 # from known indices and sequence length, generate mask and return binding site start position
 def idx_to_mask_start(idx, seqlen, dim=512):
     path = idx_to_path(idx, seqlen)
