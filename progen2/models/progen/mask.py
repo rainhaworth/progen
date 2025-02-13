@@ -73,16 +73,19 @@ def path_to_mask(path, idx, dim=512):
 # from known indices and sequence length, generate mask and return binding site start position
 # new: also generate targets
 def idx_to_mask_start(idx, seqlen, dim=512):
+    assert len(idx) <= seqlen
+    assert seqlen <= dim
+    
     path = idx_to_path(idx, seqlen)
     mask = path_to_mask(path, idx, dim)
 
     # default: ignore all
-    targets = np.ones(seqlen, dtype=int)
+    targets = np.ones(dim, dtype=int)
     targets *= -100 
-    # set targets from path; note that we have to convert from indices in seq to token ids later
+    # set targets from path; output is seq indices, must convert to token ids externally
     targets[idx] = path[0]
     for i in range(len(path)-1):
-        targets[path[i]] = path[i-1]
+        targets[path[i]] = path[i+1]
 
     return mask, np.min(idx), targets
 

@@ -26,7 +26,7 @@ from torch.nn import CrossEntropyLoss
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel
+from transformers.modeling_utils import PreTrainedModel, GenerationMixin
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from .configuration_progen import ProGenConfig
@@ -188,10 +188,12 @@ class ProGenAttention(nn.Module):
         seq_len = key.shape[1]
         offset = 0
 
+        #"""
         if layer_past is not None:
             offset = layer_past[0].shape[-2]
             seq_len += offset
-        """
+            print('layer past offset:', offset)
+        
         if self.rotary_dim is not None:
             k_rot = key[:, :, :, : self.rotary_dim]
             k_pass = key[:, :, :, self.rotary_dim :]
@@ -219,6 +221,7 @@ class ProGenAttention(nn.Module):
         #print('shapes (key, sincos):', key.shape, sincos.shape)
         key = key + sincos
         query = query + sincos 
+        """
 
         key = key.permute(0, 2, 1, 3)
         query = query.permute(0, 2, 1, 3)
@@ -572,8 +575,8 @@ class ProGenModel(ProGenPreTrainedModel):
             attentions=all_self_attentions,
         )
 
-
-class ProGenForCausalLM(ProGenPreTrainedModel):
+# added GenerationMixin just to get rid of the warning; probably won't use
+class ProGenForCausalLM(ProGenPreTrainedModel, GenerationMixin):
     _keys_to_ignore_on_load_missing = [r"h\.\d+\.attn\.masked_bias", r"h\.\d+\.attn\.bias", r"lm_head\.weight"]
 
     def __init__(self, config):

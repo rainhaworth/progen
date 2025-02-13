@@ -126,13 +126,11 @@ def main():
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
     parser.add_argument('--max-length', type=int, default=256)
-    parser.add_argument('--num-samples', type=int, default=1)
-    parser.add_argument('--fp16', default=True, type=lambda x: (str(x).lower() == 'true'))
-    parser.add_argument('--context', type=str, default='1')
-    parser.add_argument('--sanity', default=True, type=lambda x: (str(x).lower() == 'true'))
+    parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
     parser.add_argument('--save', type=str, default='./weights')
+    parser.add_argument('--bsz', type=int, default=16)
     args = parser.parse_args()
 
 
@@ -165,7 +163,7 @@ def main():
     
     # helper function; keep it small and simple for now
     def make_dataloader(dataset):
-        return torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+        return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
     with print_time('loading datasets'):
         train_dataset = ProteinBindingData(args.train, tokenizer)
@@ -185,13 +183,15 @@ def main():
     # (4) configure training
 
     # default settings from https://huggingface.co/docs/transformers/v4.46.2/en/training
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-7)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
     num_epochs = 3
     num_training_steps = num_epochs * len(train_dataloader)
 
     lr_scheduler = get_scheduler(
             name='linear', optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
             )
+    
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     model.to(device)    
 
@@ -204,32 +204,30 @@ def main():
     model.train()
     for epoch in range(num_epochs):
         print('epoch', epoch)
+        final_loss = 0
         for seqs, attns, offsets, targets in train_dataloader:
-            #print('seqs:', seqs.shape)
-            #print('attns:', attns.shape)
-            #print('offsets:', offsets.shape)
+            # put everything on the GPU
             seqs = seqs.to(device)
             attns = attns.to(device)
-            offsets = offsets.to(device)
+            offsets = offsets.to(device) # TODO: remove if remains unused
             targets = targets.to(device)
 
             logits = model(seqs,
                             attention_mask=attns,
                             pos_offsets=offsets).logits
             
-            # convert targets from idx to token id
-            #print(targets.shape)
-            #print(seqs.shape)
-            #targets = torch.where(targets >= 0, seqs[targets], targets)
-            
-            # squish logits + targets and get CE
-            loss = cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
-            print('loss:', loss)
+            # squish logits + targets, compute loss
+            loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
             loss.backward()
 
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
+
+            # print + update loss; if running in batch and you want granular loss info, remove `end='\r'`
+            print('loss: {:.5f}'.format(loss.item()), end='\r')
+            final_loss = loss.item()
+        print('end of epoch loss: {:.5f}\n'.format(final_loss))
             
     # (6) save weights
 
