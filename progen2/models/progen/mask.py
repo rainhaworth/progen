@@ -1,7 +1,7 @@
 # methods to generate flexible causal masks from sequences
 import numpy as np
 
-# random path to construct sequence starting from known indices
+# OLD random path to construct sequence starting from known indices
 # TODO: optimize; likely to become bottleneck during training, especially in batch
 def idx_to_path(idx, seqlen):
     path = []
@@ -55,6 +55,86 @@ def idx_to_path(idx, seqlen):
     
     return path
 
+# updated idx to path for n_lm_head=2, also yielding targets
+def idx_to_path_targets(idx, seqlen, dim=512):
+    path = []
+    targets = np.ones((dim, 2), dtype=int)
+    targets *= -100
+    idx = sorted(idx)
+
+    assert idx[0] >= 0
+    assert idx[-1] < seqlen
+
+    # find all binding site segments
+    segments = []
+    seg_start = idx[0]
+    prev = seg_start
+    # iterate over elements past first; hopefully it just skips this and doesn't throw an error if 1 element
+    for i in idx[1:]:
+        if i - prev == 1:
+            # expand segment
+            prev = i
+        else:
+            # complete segment
+            segments.append((seg_start, prev))
+            # start new segment
+            seg_start = i
+            prev = i
+    # add last segment
+    segments.append((seg_start, idx[-1]))
+
+    # find largest segment, use to set next_L and next_R
+    max_seg_idx = np.argmax([seg[1] - seg[0] for seg in segments])
+    max_seg = segments[max_seg_idx]
+
+    next_L = max_seg[0] - 1
+    next_R = max_seg[1] + 1
+
+    # set targets for binding site
+    # NOTE: next_L and next_R may be out of bounds, but shouldn't collide with idx
+    targets[idx, 0] = next_L if next_L != -1 else -100
+    targets[idx, 1] = next_R if next_R != seqlen else -100
+
+    # convert idx to set for faster membership checking
+    idx = set(idx)
+
+    # iterate until BOS + EOS
+    while next_L != -1 or next_R != seqlen:
+        # are L and R both valid?
+        choices = []
+        choices.append(next_L) if next_L != -1 else None
+        choices.append(next_R) if next_R != seqlen else None
+
+        # select move, update path
+        step = np.random.choice(choices)
+        path.append(step)
+
+        # if we picked next_L, update next_L
+        if step == next_L:
+            next_L -= 1
+            # check for collisions
+            if next_L in idx:
+                # assume we have few enough segments that binary search isn't worth doing
+                for seg in segments:
+                    # next_L should collide with the end of a segment
+                    if next_L == seg[1]:
+                        next_L = seg[0] - 1
+                        break
+        # otherwise, update next_R
+        else:
+            next_R += 1
+            # check for collisions in opposite direction
+            if next_R in idx:
+                for seg in segments:
+                    if next_R == seg[0]:
+                        next_R = seg[1] + 1
+        
+        # update targets
+        targets[step, 0] = next_L if next_L != -1 else -100
+        targets[step, 1] = next_R if next_R != seqlen else -100
+
+    return path, targets
+
 # from path, i.e. sequence of indices representing steps, and indices of known monomers, generate mask
 def path_to_mask(path, idx, dim=512):
     mask = np.zeros((dim, dim))
@@ -76,9 +156,12 @@ def idx_to_mask_start(idx, seqlen, dim=512):
     assert len(idx) <= seqlen
     assert seqlen <= dim
     
-    path = idx_to_path(idx, seqlen)
+    #path = idx_to_path(idx, seqlen)
+    path, targets = idx_to_path_targets(idx, seqlen, dim)
     mask = path_to_mask(path, idx, dim)
 
+    # old target generation
+    '''
     # default: ignore all
     targets = np.ones(dim, dtype=int)
     targets *= -100 
@@ -86,7 +169,10 @@ def idx_to_mask_start(idx, seqlen, dim=512):
     targets[idx] = path[0]
     for i in range(len(path)-1):
         targets[path[i]] = path[i+1]
+    '''
 
+    # TODO: min(idx) is not the offset we should be using anymore, fix later
+    #       for now, we don't even use offset, so leave it
     return mask, np.min(idx), targets
 
 # generate random path through sequence of known length

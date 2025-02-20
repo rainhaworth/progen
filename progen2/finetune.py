@@ -217,7 +217,8 @@ def main():
                             pos_offsets=offsets).logits
             
             # squish logits + targets, compute loss
-            loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+            # TODO: retrieve original lm_head size somehow instead of doing this
+            loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
             loss.backward()
 
             optimizer.step()

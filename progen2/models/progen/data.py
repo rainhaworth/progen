@@ -25,9 +25,12 @@ class ProteinBindingData(Dataset):
                 if len(line) == 0 or line[0] == '>':
                     if len(seq) == 0:
                         continue
-                    seq = seq[:max_dim]
+                    # for now, trim
+                    seq = seq[:max_dim-2]
                     # tokenize
                     seq = tokenizer.encode(seq).ids
+                    # add BOS, EOS; see tokenizer.json
+                    seq = [1] + seq + [2]
                     # store
                     self.seqs.append(torch.tensor(seq))
                     self.attns.append(None)

@@ -585,9 +585,15 @@ class ProGenForCausalLM(ProGenPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
         self.init_weights()
 
+        # throw out old LM head, make new one for multiple targets per pos
+        # TODO: figure out how to do this without hardcoding out_f multiplier
+        in_f = self.lm_head.in_features
+        out_f = self.lm_head.out_features * 2
+        self.multi_lm_head = nn.Linear(in_f, out_f)
+
         # Model parallel
         self.model_parallel = False
-        self.device_map = None
+        self.device_map = None    
 
     def parallelize(self, device_map=None):
         self.device_map = (
@@ -691,7 +697,7 @@ class ProGenForCausalLM(ProGenPreTrainedModel, GenerationMixin):
         # make sure sampling in fp16 works correctly and
         # compute loss in fp32 to match with mesh-tf version
         # https://github.com/EleutherAI/gpt-neo/blob/89ce74164da2fb16179106f54e2269b5da8db333/models/gpt2/gpt2.py#L179
-        lm_logits = self.lm_head(hidden_states).to(torch.float32)
+        lm_logits = self.multi_lm_head(hidden_states).to(torch.float32)
 
         #print('lm logits:', lm_logits.shape)
 
