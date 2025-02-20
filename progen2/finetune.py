@@ -8,6 +8,7 @@
 import os
 import time
 import random
+import numpy as np
 import argparse
 
 import torch
@@ -22,7 +23,6 @@ from models.progen.data import ProteinBindingData
 # so let's do native pytorch training
 from transformers import get_scheduler
 from tqdm.auto import tqdm
-
 
 
 ########################################################################
@@ -46,6 +46,7 @@ def set_env():
 
 
 def set_seed(seed, deterministic=True):
+    np.random.seed(seed)
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
     torch.manual_seed(seed)
@@ -70,36 +71,6 @@ def create_model(ckpt, fp16=True):
 def create_tokenizer_custom(file):
     with open(file, 'r') as f:
         return Tokenizer.from_str(f.read())
-
-
-########################################################################
-# sample
-
-
-def sample(device, model, tokenizer, context, max_length, num_return_sequences, top_p, temp, pad_token_id):
-
-    with torch.no_grad():
-        input_ids = torch.tensor(tokenizer.encode(context).ids).view([1, -1]).to(device)
-        tokens_batch = model.generate(input_ids, do_sample=True, temperature=temp, max_length=max_length, top_p=top_p, num_return_sequences=num_return_sequences, pad_token_id=pad_token_id)
-        as_lists = lambda batch: [batch[i, ...].detach().cpu().numpy().tolist() for i in range(batch.shape[0])]
-        return tokenizer.decode_batch(as_lists(tokens_batch))
-
-
-def truncate(sample, terminals):
-    pos = []
-    for terminal in terminals:
-        find_pos = sample.find(terminal, 1)
-        if find_pos != -1:
-            pos.append(find_pos)
-    if len(pos) > 0:
-        return sample[:(min(pos)+1)]
-    else:
-        return sample
-
-
-def cross_entropy(logits, target, reduction='mean'):
-    return torch.nn.functional.cross_entropy(input=logits, target=target, weight=None, size_average=None, reduce=None, reduction=reduction)
-
 
 
 ########################################################################
@@ -176,10 +147,6 @@ def main():
 
     print('train samples found:', len(train_dataset))
 
-    #print('first training sample:', train_dataset[0])
-
-    #print('second training sample:', train_dataset[1])
-
     # (4) configure training
 
     # default settings from https://huggingface.co/docs/transformers/v4.46.2/en/training
@@ -197,42 +164,42 @@ def main():
 
     # (5) train
 
-    print('training')
-
-    # TODO: pass in masks + posemb stuff, fix logit/target stuff below
-
     model.train()
-    for epoch in range(num_epochs):
-        print('epoch', epoch)
-        final_loss = 0
-        for seqs, attns, offsets, targets in train_dataloader:
-            # put everything on the GPU
-            seqs = seqs.to(device)
-            attns = attns.to(device)
-            offsets = offsets.to(device) # TODO: remove if remains unused
-            targets = targets.to(device)
 
-            logits = model(seqs,
-                            attention_mask=attns,
-                            pos_offsets=offsets).logits
-            
-            # squish logits + targets, compute loss
-            # TODO: retrieve original lm_head size somehow instead of doing this
-            loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
-            loss.backward()
+    with print_time('training'):
+        for epoch in range(num_epochs):
+            print('epoch', epoch)
+            final_loss = 0
+            for seqs, attns, offsets, targets in train_dataloader:
+                # put everything on the GPU
+                seqs = seqs.to(device)
+                attns = attns.to(device)
+                offsets = offsets.to(device) # TODO: remove if remains unused
+                targets = targets.to(device)
 
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+                logits = model(seqs,
+                                attention_mask=attns,
+                                pos_offsets=offsets).logits
+                
+                # squish logits + targets, compute loss
+                # TODO: retrieve original lm_head size somehow instead of doing this
+                loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
+                loss.backward()
 
-            # print + update loss; if running in batch and you want granular loss info, remove `end='\r'`
-            print('loss: {:.5f}'.format(loss.item()), end='\r')
-            final_loss = loss.item()
-        print('end of epoch loss: {:.5f}\n'.format(final_loss))
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+
+                # print + update loss; if running in batch and you want granular loss info, remove `end='\r'`
+                print('loss: {:.5f}'.format(loss.item()), end='\r')
+                final_loss = loss.item()
+            print('end of epoch loss: {:.5f}\n'.format(final_loss))
             
     # (6) save weights
 
-    #torch.save(model, os.path.join(args.save, 'model.pt')
+    save_path = os.path.join(args.save, 'model.pt')
+    torch.save(model, save_path)
+    print('saved to', save_path, end='\n\n')
 
 
 if __name__ == '__main__':
