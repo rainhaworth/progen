@@ -1,6 +1,28 @@
 # methods to generate flexible causal masks from sequences
 import numpy as np
 
+# helper function: convert list of indices to list of contiguous segments
+# represented as list of tuples (start, end)
+def idx_to_segments(idx):
+    segments = []
+    seg_start = idx[0]
+    prev = seg_start
+    # iterate over elements past first
+    for i in idx[1:]:
+        if i - prev == 1:
+            # expand segment
+            prev = i
+        else:
+            # complete segment
+            segments.append((seg_start, prev))
+            # start new segment
+            seg_start = i
+            prev = i
+    # add last segment
+    segments.append((seg_start, idx[-1]))
+
+    return segments
+
 # OLD random path to construct sequence starting from known indices
 # TODO: optimize; likely to become bottleneck during training, especially in batch
 def idx_to_path(idx, seqlen):
@@ -9,22 +31,7 @@ def idx_to_path(idx, seqlen):
     while len(idx_curr) < seqlen:
         # get list of contiguous segments in idx_curr as 2-tuples
         # single-element segments have same value for each tuple field, this is fine
-        segments = []
-        seg_start = idx_curr[0]
-        prev = seg_start
-        # iterate over elements past first; hopefully it just skips this and doesn't throw an error if 1 element
-        for idx in idx_curr[1:]:
-            if idx - prev == 1:
-                prev = idx
-                continue
-            else:
-                # complete segment
-                segments.append((seg_start, prev))
-                # start new segment
-                seg_start = idx
-                prev = idx
-        # get last segment
-        segments.append((seg_start, idx_curr[-1]))
+        segments = idx_to_segments(idx_curr)
         
         # check whether we need to move further past the leftmost and rightmost elements in the sequence
         found_start = (idx_curr[0] == 0)
@@ -66,24 +73,9 @@ def idx_to_path_targets(idx, seqlen, dim=512):
     assert idx[-1] < seqlen
 
     # find all binding site segments
-    segments = []
-    seg_start = idx[0]
-    prev = seg_start
-    # iterate over elements past first; hopefully it just skips this and doesn't throw an error if 1 element
-    for i in idx[1:]:
-        if i - prev == 1:
-            # expand segment
-            prev = i
-        else:
-            # complete segment
-            segments.append((seg_start, prev))
-            # start new segment
-            seg_start = i
-            prev = i
-    # add last segment
-    segments.append((seg_start, idx[-1]))
+    segments = idx_to_segments(idx)
 
-    # find largest segment, use to set next_L and next_R
+    # find largest segment, use to set next_L and next_R for path
     max_seg_idx = np.argmax([seg[1] - seg[0] for seg in segments])
     max_seg = segments[max_seg_idx]
 
@@ -91,9 +83,11 @@ def idx_to_path_targets(idx, seqlen, dim=512):
     next_R = max_seg[1] + 1
 
     # set targets for binding site
-    # NOTE: next_L and next_R may be out of bounds, but shouldn't collide with idx
-    targets[idx, 0] = next_L if next_L != -1 else -100
-    targets[idx, 1] = next_R if next_R != seqlen else -100
+    for seg in segments:
+        prev = seg[0] - 1
+        next = seg[1] + 1
+        targets[seg[0], 0] = prev if prev != -1 else -100
+        targets[seg[1], 1] = next if next != seqlen else -100
 
     # convert idx to set for faster membership checking
     idx = set(idx)
@@ -108,6 +102,7 @@ def idx_to_path_targets(idx, seqlen, dim=512):
         # select move, update path
         step = np.random.choice(choices)
         path.append(step)
+        idx.add(step)
 
         # if we picked next_L, update next_L
         if step == next_L:
@@ -130,8 +125,12 @@ def idx_to_path_targets(idx, seqlen, dim=512):
                         next_R = seg[1] + 1
         
         # update targets
-        targets[step, 0] = next_L if next_L != -1 else -100
-        targets[step, 1] = next_R if next_R != seqlen else -100
+        targets[step, 0] = step - 1 if step - 1 != -1 else -100
+        targets[step, 1] = step + 1 if step + 1 != seqlen else -100
+    
+    #full_idxs = np.arange(seqlen)
+    #targets[full_idxs[1:], 0] = full_idxs[:-1]
+    #targets[full_idxs[:-1], 1] = full_idxs[1:]
 
     return path, targets
 
@@ -176,7 +175,8 @@ def idx_to_mask_start(idx, seqlen, dim=512):
     return mask, np.min(idx), targets
 
 # generate random path through sequence of known length
-def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2):
+# just_binding arg: skip making the mask, just return the binding site
+def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2, just_binding=False):
     # generate artificial binding site position
     sz = max(1, np.random.poisson(exp_sz))
     keep_idx = np.random.random(sz) > p_drop
@@ -185,5 +185,8 @@ def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2):
     start = np.random.randint(0, seqlen-sz)
     idx = np.arange(start, start+sz)[keep_idx]
     
+    if just_binding:
+        return idx
+
     # get mask and start position
     return idx_to_mask_start(idx, seqlen, dim)
