@@ -95,16 +95,16 @@ def main():
     
     # (0) constants
 
-    models_151M = [ 'progen2-small' ]
-    models_754M = [ 'progen2-medium', 'progen2-oas', 'progen2-base' ]
-    models_2B = [ 'progen2-large', 'progen2-BFD90' ]
-    models_6B = [ 'progen2-xlarge' ]
-    models = models_151M + models_754M + models_2B + models_6B
+    #models_151M = [ 'progen2-small' ]
+    #models_754M = [ 'progen2-medium', 'progen2-oas', 'progen2-base' ]
+    #models_2B = [ 'progen2-large', 'progen2-BFD90' ]
+    #models_6B = [ 'progen2-xlarge' ]
+    #models = models_151M + models_754M + models_2B + models_6B
     
     # (1) params
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, choices=models, default='progen2-small')
+    #parser.add_argument('--model', type=str, choices=models, default='progen2-small')
     parser.add_argument('--weights', type=str, default='./weights/model.pt')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
@@ -127,7 +127,7 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
-    ckpt = args.model
+    #ckpt = args.model
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -151,27 +151,22 @@ def main():
 
     # (4) generate
 
-    # TODO: write all these things
-        # binding-site-only Dataset w/ appropriate masking
-        # sampling algorithm (greedy for now)
-        # procedure to step through sampling until we hit EOS + BOS
-
     BOS_ID = 1
     EOS_ID = 2
 
-    max_steps = 10
+    max_steps = 50
 
     model.eval()
 
     with print_time('generating'):
         for seq, idxs in dataloader:
-            print('binding site:\t', tokenizer.decode(seq.squeeze().numpy()))
+            print('binding site:\t', tokenizer.decode(seq.squeeze(0).numpy()))
             print('idxs:\t\t', idxs.squeeze().numpy().tolist())
             # put everything on the GPU
             seq = seq.to(device)
             idxs = idxs.to(device)
 
-            idxs = torch.squeeze(idxs)
+            idxs = idxs.squeeze(0)
 
             # greedy search
             for _ in range(max_steps):
@@ -214,6 +209,9 @@ def main():
                     new_token = n_toks[bni]
                     new_pos = n_idxs[bni]
                     new_pos += 1
+
+                if new_token == BOS_ID or new_token == EOS_ID:
+                    print('EOS/BOS found')
 
                 # finally, update seq and idxs
                 new_token = new_token[None,None]

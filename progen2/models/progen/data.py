@@ -13,7 +13,7 @@ def fasta_gen(file):
             if len(line) == 0 or line[0] == '>':
                 if len(seq) == 0:
                     continue
-                yield seq
+                yield seq, None
                 seq = ''
             seq += line.strip()
 
@@ -41,12 +41,22 @@ def tsv_gen(file):
                     assert 1 <= len(bind_range) <= 2
                     if len(bind_range) == 1:
                         # single -> tensor
-                        bind_idx = torch.tensor(int(bind_range[0]))
-                    else
+                        bind_idx = torch.tensor([int(bind_range[0])])
+                    else:
                         # range
                         bind_idx = range(int(bind_range[0]), int(bind_range[1])+1)
                         bind_idx = torch.tensor(bind_idx)
                     yield seq, bind_idx
+
+# select generator from file extension
+def make_gen_from_ext(file):
+    ext = file.split('.')[-1]
+    if ext in ['fasta', 'fa']:
+        return fasta_gen(file)
+    elif ext == 'tsv':
+        return tsv_gen(file)
+    else:
+        raise ValueError('Invalid file extension ' + ext + '; expected fasta or tsv')
 
 # binding site dropout for tensor idxs
 def apply_dropout(idxs, p_drop=0.2):
@@ -55,23 +65,19 @@ def apply_dropout(idxs, p_drop=0.2):
     elems_to_drop = np.random.binomial(len(idxs), p_drop)
     elems_to_keep = max(len(idxs) - elems_to_drop, 1)
     idxs_new = idxs[torch.randperm(len(idxs))]
-    return torch.sort(idxs_new[:elems_to_keep])
+    return torch.sort(idxs_new[:elems_to_keep]).values
 
 class ProteinBindingData(Dataset):
-    def __init__(self, in_file, tokenizer, max_dim=512, max_samples=1000, rand_bindings=True, p_drop=0.2):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000, p_drop=0.2):
         self.max_dim = max_dim
         self.p_drop = p_drop
         # load entire dataset into working memory
         # if you want to use a big dataset rewrite as iterable
-        # or bring lots of memory i guess
         self.seqs = []
         self.idxs = []
 
-        # set generator type
-        if rand_bindings:
-            gen = fasta_gen(in_file)
-        else:
-            gen = tsv_gen(in_file)
+        # get generator
+        gen = make_gen_from_ext(file)
 
         # fetch all sequences and binding sites if available
         sample_count = 0
@@ -120,29 +126,33 @@ class ProteinBindingData(Dataset):
 
 # generation dataset
 class ProteinBindingOnlyData(Dataset):
-    def __init__(self, fasta_file, tokenizer, max_dim=512, max_samples=15, rand_bindings=False):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=15):
         self.max_dim = max_dim
         self.seqs = []
         self.idxs = []
 
         # set generator type
-        if rand_bindings:
-            gen = fasta_gen(in_file)
-        else:
-            gen = tsv_gen(in_file)
+        gen = make_gen_from_ext(file)
         
         # fetch all
+        sample_count = 0
         for seq, idx in gen:
-            # for now, trim
-            seq = seq[:max_dim-2]
             # tokenize
             seq = tokenizer.encode(seq).ids
-            # add BOS, EOS; see tokenizer.json
+            # add BOS, EOS (see tokenizer.json)
             seq = [1] + seq + [2]
-            # get binding site if necessary
+            # generate artificial binding site if necessary
             if idx is None:
                 idx = rand_mask_start(len(seq), self.max_dim, just_binding=True)
+            # otherwise, adjust for extra token then randomly drop indices
+            else:
+                idx += 1
+                idx = apply_dropout(idx)
+            # store smallest possible subsequence
             seq = seq[idx[0] : idx[-1] + 1]
+            # trim, just in case; TODO: remove this when we can handle long seqs
+            seq = seq[:max_dim]
+            print(seq)
             # store
             self.seqs.append(torch.tensor(seq))
             self.idxs.append(idx - idx[0])

@@ -2,3 +2,8 @@
 **/.venv
 **/.vscode
 **/checkpoints
+
+*.fasta
+*.tsv
+*.gz
+*.pt
