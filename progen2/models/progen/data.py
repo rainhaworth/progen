@@ -82,8 +82,6 @@ class ProteinBindingData(Dataset):
         # fetch all sequences and binding sites if available
         sample_count = 0
         for seq, idx in gen:
-            # for now, trim
-            seq = seq[:max_dim-2]
             # tokenize
             seq = tokenizer.encode(seq).ids
             # add BOS, EOS; see tokenizer.json
@@ -104,10 +102,34 @@ class ProteinBindingData(Dataset):
         seq = self.seqs[idx]
         idxs = self.idxs[idx]
 
+        # if sequence is bigger than max_dim, take random subsequence
+        offset = 0
+        if len(seq) > self.max_dim:
+            min_idx = 0
+            max_idx = len(seq) - self.max_dim
+            # restrict to contain binding site if known
+            if idxs is not None:
+                # hopefully binding site is small enough to fit in the subseq
+                if idxs[-1] - idxs[0] < self.max_dim:
+                    min_idx = max(0, idxs[-1].item() - self.max_dim)
+                    max_idx = min(max_idx, idxs[0].item())
+                # if not, just get a chunk of it
+                else:
+                    min_idx = idxs[0].item()
+                    max_idx = idxs[-1].item() - self.max_dim
+                    # avoid breaking randint
+                    if min_idx == max_idx:
+                        max_idx += 1
+            # compute offset
+            offset = np.random.randint(min_idx, max_idx)
+            # update seq
+            seq = seq[offset : offset + self.max_dim]
+
         # generate random path -> mask + targets
         # for now, pad everything to max_dim
         if idxs is not None:
-            # apply dropout
+            # apply offset (if applicable) and dropout
+            idxs -= offset
             idxs_drop = apply_dropout(idxs, self.p_drop)
             # generate
             attn, offset, targets = idx_to_mask_start(idxs_drop, len(seq), self.max_dim)
@@ -152,7 +174,6 @@ class ProteinBindingOnlyData(Dataset):
             seq = seq[idx[0] : idx[-1] + 1]
             # trim, just in case; TODO: remove this when we can handle long seqs
             seq = seq[:max_dim]
-            print(seq)
             # store
             self.seqs.append(torch.tensor(seq))
             self.idxs.append(idx - idx[0])
