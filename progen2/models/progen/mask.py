@@ -23,47 +23,67 @@ def idx_to_segments(idx):
 
     return segments
 
-# OLD random path to construct sequence starting from known indices
-# TODO: optimize; likely to become bottleneck during training, especially in batch
-def idx_to_path(idx, seqlen):
+# generate path randomly choosing from valid steps
+def idx_to_path_targets_valid(idx, seqlen, dim=512):
     path = []
-    idx_curr = sorted(idx)
-    while len(idx_curr) < seqlen:
-        # get list of contiguous segments in idx_curr as 2-tuples
-        # single-element segments have same value for each tuple field, this is fine
-        segments = idx_to_segments(idx_curr)
-        
-        # check whether we need to move further past the leftmost and rightmost elements in the sequence
-        found_start = (idx_curr[0] == 0)
-        found_end = (idx_curr[-1] == seqlen - 1)
-        
-        # for each segment, there are 2 possible steps: move left of leftmost index or move right of rightmost
-        # get list of all such steps
-        steps = []
-        for segment in segments:
-            steps.append(segment[0]-1)
-            steps.append(segment[1]+1)
+    targets = np.ones((dim, 2), dtype=int)
+    targets *= -100
+    idx = sorted(idx)
 
-        # prune if necessary
-        if found_start:
-            steps = steps[1:]
-        if found_end:
-            steps = steps[:-1]
+    assert idx[0] >= 0
+    assert idx[-1] < seqlen
+
+    # find initial binding site segments
+    segments = idx_to_segments(idx)
+
+    # set first batch of targets
+    for seg in segments:
+        prev = seg[0] - 1
+        next = seg[1] + 1
+        targets[seg[0], 0] = prev if prev != -1 else -100
+        targets[seg[1], 1] = next if next != seqlen else -100
+
+    # iterate until we only have one segment covering the whole sequence
+    while segments[0][0] != 0 or segments[0][1] != seqlen-1:
+        # get all possible choices
+        choices = []
+        for i, seg in enumerate(segments):
+            if seg[0] > 0:
+                choices.append((seg[0] - 1, i))
+            if seg[1] < seqlen-1:
+                choices.append((seg[1] + 1, i))
         
-        # get unique; if 2 segments are separated by 1 index, that index will be duplicated and its probability will be doubled
-        # this is probably not a huge deal but i would rather avoid doing it unintentionally
-        steps = np.unique(steps)
-        
-        # select move, update path and idx
-        step = np.random.choice(steps)
+        # select next step, update path
+        cidx = np.random.randint(0, len(choices))
+        step = choices[cidx][0]
+        i = choices[cidx][1]
         path.append(step)
-        idx_curr.append(step)
-        idx_curr = sorted(idx_curr)
-    
-    return path
 
-# updated idx to path for n_lm_head=2, also yielding targets
-def idx_to_path_targets(idx, seqlen, dim=512):
+        # update segments + targets
+        if segments[i][0] - 1 == step:
+            # merge segments if necessary; no new targets because both adjacent amino acids are known
+            if i > 0 and segments[i-1][1] + 1 == step:
+                segments[i] = (segments[i-1][0], segments[i][1])
+                segments.pop(i-1)
+            # otherwise expand segment and update targets
+            else:
+                segments[i] = (segments[i][0] - 1, segments[i][1])
+                targets[step, 0] = step - 1 if step > 0 else -100
+        else:
+            # same as before but opposite direction
+            if i < len(segments)-1 and segments[i+1][0] - 1 == step:
+                segments[i] = (segments[i][0], segments[i+1][1])
+                segments.pop(i+1)
+            else:
+                segments[i] = (segments[i][0], segments[i][1] + 1)
+                targets[step, 1] = step + 1 if step + 1 < seqlen else -100
+    
+    return path, targets
+
+
+
+# generate path randomly stepping out from largest chunk
+def idx_to_path_targets_largest(idx, seqlen, dim=512):
     path = []
     targets = np.ones((dim, 2), dtype=int)
     targets *= -100
@@ -151,24 +171,12 @@ def path_to_mask(path, idx, dim=512):
 
 # from known indices and sequence length, generate mask and return binding site start position
 # new: also generate targets
-def idx_to_mask_start(idx, seqlen, dim=512):
+def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
     assert len(idx) <= seqlen
     assert seqlen <= dim
     
-    #path = idx_to_path(idx, seqlen)
-    path, targets = idx_to_path_targets(idx, seqlen, dim)
+    path, targets = pathfn(idx, seqlen, dim)
     mask = path_to_mask(path, idx, dim)
-
-    # old target generation
-    '''
-    # default: ignore all
-    targets = np.ones(dim, dtype=int)
-    targets *= -100 
-    # set targets from path; output is seq indices, must convert to token ids externally
-    targets[idx] = path[0]
-    for i in range(len(path)-1):
-        targets[path[i]] = path[i+1]
-    '''
 
     # TODO: min(idx) is not the offset we should be using anymore, fix later
     #       for now, we don't even use offset, so leave it
