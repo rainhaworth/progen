@@ -7,3 +7,5 @@
 *.tsv
 *.gz
 *.pt
+*.png
+*.sh

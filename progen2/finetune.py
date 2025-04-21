@@ -102,6 +102,7 @@ def main():
     parser.add_argument('--eval', type=str, default='')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=16)
+    parser.add_argument('--max_samples', type=int, default=1000)
     args = parser.parse_args()
 
 
@@ -136,8 +137,8 @@ def main():
     def make_dataloader(dataset):
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
-    with print_time('loading datasets'):
-        train_dataset = ProteinBindingData(args.train, tokenizer)
+    with print_time('loading up to ' + str(args.max_samples) + ' samples'):
+        train_dataset = ProteinBindingData(args.train, tokenizer, max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
 
         eval_dataloader = None
@@ -180,7 +181,7 @@ def main():
                 logits = model(seqs,
                                 attention_mask=attns,
                                 pos_offsets=offsets).logits
-                
+
                 # squish logits + targets, compute loss
                 # TODO: retrieve original lm_head size somehow instead of doing this
                 loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
@@ -189,7 +190,7 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-
+                
                 # print + update loss; if running in batch and you want granular loss info, remove `end='\r'`
                 print('loss: {:.5f}'.format(loss.item()), end='\r')
                 final_loss = loss.item()

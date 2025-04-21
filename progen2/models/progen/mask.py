@@ -171,8 +171,8 @@ def path_to_mask(path, idx, dim=512):
 
 # from known indices and sequence length, generate mask and return binding site start position
 # new: also generate targets
-def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
-    assert len(idx) <= seqlen
+def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_largest):
+    assert 0 < len(idx) <= seqlen
     assert seqlen <= dim
     
     path, targets = pathfn(idx, seqlen, dim)
@@ -180,7 +180,7 @@ def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_valid):
 
     # TODO: min(idx) is not the offset we should be using anymore, fix later
     #       for now, we don't even use offset, so leave it
-    return mask, np.min(idx), targets
+    return mask, 0, targets
 
 # generate random path through sequence of known length
 # just_binding arg: skip making the mask, just return the binding site

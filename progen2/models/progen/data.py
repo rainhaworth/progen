@@ -36,9 +36,19 @@ def tsv_gen(file):
             for sub_bind in bind_split:
                 # for now, just make pairs for each BINDING instance
                 if sub_bind[:7] == 'BINDING':
-                    # get single position index or range of position indices
                     bind_range = sub_bind.split()[-1].split('..')
-                    assert 1 <= len(bind_range) <= 2
+                    # enforce valid binding site
+                    try:
+                        # enforce correct number of elements
+                        assert 1 <= len(bind_range) <= 2
+                        # enforce sequence bounds
+                        assert min(0 < int(x) < len(seq) for x in bind_range)
+                        # enforce valid range
+                        if len(bind_range) == 2:
+                            assert int(bind_range[0]) <= int(bind_range[1])
+                    except:
+                        continue
+                    # get single position index or range of position indices
                     if len(bind_range) == 1:
                         # single -> tensor
                         bind_idx = torch.tensor([int(bind_range[0])])
