@@ -111,9 +111,11 @@ def main():
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--max-length', type=int, default=256)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--data', type=str, default='./data/uniprot_sprot.fasta')
+    parser.add_argument('--max-steps', type=int, default=50)
+    parser.add_argument('--rep-window', type=int, default=4)
+    parser.add_argument('--rep-penalty', type=float, default=1.2)
     args = parser.parse_args()
 
 
@@ -154,7 +156,9 @@ def main():
     BOS_ID = 1
     EOS_ID = 2
 
-    max_steps = 50
+    max_steps = args.max_steps
+    rw = args.rep_window
+    rp = args.rep_penalty
 
     model.eval()
 
@@ -182,41 +186,47 @@ def main():
                 p_idxs = [seg[0] for seg in segments]
                 n_idxs = [seg[1] for seg in segments]
 
-                # TODO: filter out PTP at BOS, NTP at EOS
-
-                # find PTP and NTP logits at corresponding indices
-                half_sz = logits.size(-1) // 2
-                p_logits = logits[p_idxs,:half_sz]
-                n_logits = logits[n_idxs,half_sz:]
-
-                # get best scores at each position
-                p_vals, p_toks = torch.max(p_logits, dim=-1)
-                n_vals, n_toks = torch.max(n_logits, dim=-1)
-
-                # get single best score for PTP and NTP
-                bpv, bpi = torch.max(p_vals, dim=0)
-                bnv, bni = torch.max(n_vals, dim=0)
-
-                # if previous better than next, do PTP
-                if bpv > bnv:
-                    # get new token label + position where we predicted it
-                    new_token = p_toks[bpi]
-                    new_pos = p_idxs[bpi]
-                    # shift to previous position for insertion
-                    new_pos -= 1
-                # otherwise, do NTP
-                else:
-                    new_token = n_toks[bni]
-                    new_pos = n_idxs[bni]
-                    new_pos += 1
-
+                # TODO: filter out PTP at BOS, NTP at EOS; eventually no guarantee that len(n_idxs) == len(p_idxs)
                 if new_token == BOS_ID or new_token == EOS_ID:
                     print('EOS/BOS found')
 
+                # get repetition penalties for fixed window containing current token
+                # inner comprehension to ensure these are "real" tokens
+                p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
+                n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
+
+                # find PTP and NTP logits at corresponding indices, concat
+                half_sz = logits.size(-1) // 2
+                p_logits = logits[p_idxs,:half_sz]
+                n_logits = logits[n_idxs,half_sz:]
+                logits = torch.concat([p_logits, n_logits])
+
+                # apply repetition penalties; can probably do this faster but with window=4 it's fine
+                penalties = torch.ones_like(logits)
+                for i, pens in enumerate(p_penalties + n_penalties):
+                    for p in pens:
+                        penalties[i, p] = rp
+                logits = logits / penalties
+
+                # compute (numerically stable) softmax over all logits representing viable next steps
+                exp_logits = torch.exp(logits - torch.max(logits))
+                sum_exp_logits = torch.sum(exp_logits)
+                logits = exp_logits / sum_exp_logits
+
+                # find best score at each position
+                vals, toks = torch.max(logits, dim=-1)
+
+                # find best position + predicted token; max logit is at logits[best_i, toks[best_i]]
+                best_i = torch.argmax(vals)
+                new_token = toks[best_i]
+
+                # at this position, are we doing PTP or NTP? handle accordingly
+                PTP = best_i < len(p_idxs)
+                if PTP: new_pos = p_idxs[best_i] - 1
+                else:   new_pos = n_idxs[best_i - len(p_idxs)] + 1
+
                 # finally, update seq and idxs
                 new_token = new_token[None,None]
-
-                # edge cases: increase sequence length
                 if new_pos == -1:
                     # prepend, shift all indices up
                     seq = torch.cat([new_token, seq], dim=-1)
@@ -233,7 +243,7 @@ def main():
                     idxs = idxs.sort()[0]
 
                 # print
-                #print(idxs.numpy(force=True))
+                #print(idxs.numpy(force=True), seq.shape)
                 #print(tokenizer.decode(seq.squeeze().numpy(force=True)))
             print('generated:\t', tokenizer.decode(seq.squeeze().numpy(force=True)), end='\n\n')
 
