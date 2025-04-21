@@ -86,6 +86,28 @@ def make_inference_mask(seqlen, idx, device, dim=512):
     # add batch dim
     return mask[None,:,:]
 
+# greedy sampling: find best logit and return corresponding position + token
+def greedy_sample(logits):
+    vals, toks = torch.max(logits, dim=-1)
+    best_i = torch.argmax(vals)
+    return best_i, toks[best_i]
+
+# nucleus sampling: choose position + token with probability given by logit distribution
+def nucleus_sample(logits, p=0.95):
+    # find largest cutoff where we retain at least p of the probability mass
+    logits_rev = logits.flatten().sort(descending=True)[0]
+    cum_probs = logits_rev.cumsum(0)
+    min_keep_idx = torch.sum(cum_probs < p)
+
+    # rescale logits
+    min_keep_val = logits_rev[min_keep_idx]
+    p_prime = cum_probs[min_keep_idx]
+    logits_rescaled = torch.where(logits >= min_keep_val, logits / p_prime, 0)
+
+    # sample; need to flatten then convert back to dim 0, dim 1 indices
+    idx_flat = torch.multinomial(logits_rescaled.flatten(), 1)[0]
+    return idx_flat // logits.shape[1], idx_flat % logits.shape[1]
+
 
 ########################################################################
 # main
@@ -116,6 +138,7 @@ def main():
     parser.add_argument('--max-steps', type=int, default=50)
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
+    parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
     args = parser.parse_args()
 
 
@@ -160,6 +183,12 @@ def main():
     rw = args.rep_window
     rp = args.rep_penalty
 
+    # sample_fn input: logits, output: (index along logits dim=0, token ID)
+    if args.sample == 'nucleus':
+        sample_fn = nucleus_sample
+    else:
+        sample_fn = greedy_sample
+
     model.eval()
 
     with print_time('generating'):
@@ -187,8 +216,6 @@ def main():
                 n_idxs = [seg[1] for seg in segments]
 
                 # TODO: filter out PTP at BOS, NTP at EOS; eventually no guarantee that len(n_idxs) == len(p_idxs)
-                if new_token == BOS_ID or new_token == EOS_ID:
-                    print('EOS/BOS found')
 
                 # get repetition penalties for fixed window containing current token
                 # inner comprehension to ensure these are "real" tokens
@@ -213,17 +240,16 @@ def main():
                 sum_exp_logits = torch.sum(exp_logits)
                 logits = exp_logits / sum_exp_logits
 
-                # find best score at each position
-                vals, toks = torch.max(logits, dim=-1)
+                # sample next step (index, token) from logits
+                new_i, new_token = sample_fn(logits)
 
-                # find best position + predicted token; max logit is at logits[best_i, toks[best_i]]
-                best_i = torch.argmax(vals)
-                new_token = toks[best_i]
+                if new_token == BOS_ID or new_token == EOS_ID:
+                    print('EOS/BOS found')
 
-                # at this position, are we doing PTP or NTP? handle accordingly
-                PTP = best_i < len(p_idxs)
-                if PTP: new_pos = p_idxs[best_i] - 1
-                else:   new_pos = n_idxs[best_i - len(p_idxs)] + 1
+                # get new token position from index, offset according to PTP vs NTP
+                PTP = new_i < len(p_idxs)
+                if PTP: new_pos = p_idxs[new_i] - 1
+                else:   new_pos = n_idxs[new_i - len(p_idxs)] + 1
 
                 # finally, update seq and idxs
                 new_token = new_token[None,None]
@@ -242,7 +268,7 @@ def main():
                     idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
                     idxs = idxs.sort()[0]
 
-                # print
+                # debugging
                 #print(idxs.numpy(force=True), seq.shape)
                 #print(tokenizer.decode(seq.squeeze().numpy(force=True)))
             print('generated:\t', tokenizer.decode(seq.squeeze().numpy(force=True)), end='\n\n')
