@@ -212,23 +212,24 @@ def main():
                 segments = idx_to_segments(idxs.detach().clone())
 
                 # get indices for PTP and NTP
-                p_idxs = [seg[0] for seg in segments]
-                n_idxs = [seg[1] for seg in segments]
-
-                # TODO: filter out PTP at BOS, NTP at EOS; eventually no guarantee that len(n_idxs) == len(p_idxs)
-
-                # get repetition penalties for fixed window containing current token
-                # inner comprehension to ensure these are "real" tokens
-                p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
-                n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
+                p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] != BOS_ID]
+                n_idxs = [seg[1] for seg in segments if seq[:,seg[0]] != EOS_ID]
 
                 # find PTP and NTP logits at corresponding indices, concat
                 half_sz = logits.size(-1) // 2
-                p_logits = logits[p_idxs,:half_sz]
-                n_logits = logits[n_idxs,half_sz:]
-                logits = torch.concat([p_logits, n_logits])
+                if len(n_idxs) > 0 and len(p_idxs) > 0:
+                    p_logits = logits[p_idxs,:half_sz]
+                    n_logits = logits[n_idxs,half_sz:]
+                    logits = torch.concat([p_logits, n_logits])
+                
+                # handle edge cases + stop if we have no valid steps
+                elif len(p_idxs) > 0: logits = logits[p_idxs,:half_sz]
+                elif len(n_idxs) > 0: logits = logits[n_idxs,half_sz:]
+                else: break                
 
                 # apply repetition penalties; can probably do this faster but with window=4 it's fine
+                p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
+                n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
                 penalties = torch.ones_like(logits)
                 for i, pens in enumerate(p_penalties + n_penalties):
                     for p in pens:
@@ -243,6 +244,7 @@ def main():
                 # sample next step (index, token) from logits
                 new_i, new_token = sample_fn(logits)
 
+                # TODO: handle incorrect EOS/BOS output
                 if new_token == BOS_ID or new_token == EOS_ID:
                     print('EOS/BOS found')
 
