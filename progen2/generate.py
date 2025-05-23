@@ -20,6 +20,8 @@ from models.progen.modeling_flexible import ProGenForCausalLM
 from models.progen.data import ProteinBindingOnlyData
 from models.progen.mask import idx_to_segments
 
+from tqdm import tqdm
+
 
 ########################################################################
 # util
@@ -108,7 +110,6 @@ def nucleus_sample(logits, p=0.95):
     idx_flat = torch.multinomial(logits_rescaled.flatten(), 1)[0]
     return idx_flat // logits.shape[1], idx_flat % logits.shape[1]
 
-
 ########################################################################
 # main
 
@@ -139,6 +140,7 @@ def main():
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
+    parser.add_argument('--max-window', type=int, default=256)
     args = parser.parse_args()
 
 
@@ -176,12 +178,15 @@ def main():
 
     # (4) generate
 
+    PAD_ID = 0
     BOS_ID = 1
     EOS_ID = 2
+    MAX_ID = 29
 
     max_steps = args.max_steps
     rw = args.rep_window
     rp = args.rep_penalty
+    max_w = args.max_window
 
     # sample_fn input: logits, output: (index along logits dim=0, token ID)
     if args.sample == 'nucleus':
@@ -201,31 +206,48 @@ def main():
 
             idxs = idxs.squeeze(0)
 
-            # greedy search
-            for _ in range(max_steps):
-                # make mask, call model, squeeze batch dim to make life easier
-                mask = make_inference_mask(seq.size(1), idxs, device)
-                logits = model(seq, attention_mask=mask).logits
-                logits = torch.squeeze(logits, 0)
-
+            for _ in tqdm(range(max_steps)):
                 # get segments; use copy of idxs so we don't have weird memory issues
                 segments = idx_to_segments(idxs.detach().clone())
 
-                # get indices for PTP and NTP
+                # get PTP/NTP indices
                 p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] != BOS_ID]
-                n_idxs = [seg[1] for seg in segments if seq[:,seg[0]] != EOS_ID]
+                n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] != EOS_ID]
 
-                # find PTP and NTP logits at corresponding indices, concat
-                half_sz = logits.size(-1) // 2
-                if len(n_idxs) > 0 and len(p_idxs) > 0:
+                # stop inference if we have no valid steps
+                if len(n_idxs) == 0 and len(p_idxs) == 0: break
+
+                # normal inference for short sequences
+                if seq.size(1) <= max_w:
+                    # make mask, call model, squeeze batch dim to make life easier
+                    mask = make_inference_mask(seq.size(1), idxs, device)
+                    logits = model(seq, attention_mask=mask).logits
+                    logits = torch.squeeze(logits, 0)
+
+                    # get PTP/NTP logits
+                    half_sz = logits.size(-1) // 2
                     p_logits = logits[p_idxs,:half_sz]
                     n_logits = logits[n_idxs,half_sz:]
-                    logits = torch.concat([p_logits, n_logits])
-                
-                # handle edge cases + stop if we have no valid steps
-                elif len(p_idxs) > 0: logits = logits[p_idxs,:half_sz]
-                elif len(n_idxs) > 0: logits = logits[n_idxs,half_sz:]
-                else: break                
+
+                # two separate model calls for long sequences
+                else:
+                    mask_L = make_inference_mask(max_w, idxs[idxs < max_w], device)
+                    logits_L = model(seq[:,:max_w], attention_mask=mask_L).logits.squeeze(0)
+
+                    off_R = seq.size(1) - max_w
+                    idxs_R = idxs - off_R
+                    mask_R = make_inference_mask(max_w, idxs_R[idxs_R >= 0], device)
+                    logits_R = model(seq[:,off_R:], attention_mask=mask_R).logits.squeeze(0)
+
+                    # convert n_idxs to logits_R space; preserve original n_idxs so we can use it to retrieve position
+                    n_idxs_R = [i-off_R for i in n_idxs]
+
+                    half_sz = logits_L.size(-1) // 2 # should be identical to logits_R.size(-1)
+                    p_logits = logits_L[p_idxs,:half_sz]
+                    n_logits = logits_R[n_idxs_R,half_sz:]
+
+                # concat logits
+                logits = torch.concat([p_logits, n_logits])  
 
                 # apply repetition penalties; can probably do this faster but with window=4 it's fine
                 p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
@@ -242,14 +264,18 @@ def main():
                 logits = exp_logits / sum_exp_logits
 
                 # sample next step (index, token) from logits
-                new_i, new_token = sample_fn(logits)
+                while True:
+                    new_i, new_token = sample_fn(logits)
+                    PTP = new_i < len(p_idxs)
 
-                # TODO: handle incorrect EOS/BOS output
-                if new_token == BOS_ID or new_token == EOS_ID:
-                    print('EOS/BOS found')
+                    # enforce no invalid tokens
+                    if new_token == PAD_ID or new_token > MAX_ID: continue
+                    if PTP and new_token == EOS_ID: continue
+                    if not PTP and new_token == BOS_ID: continue
+
+                    break
 
                 # get new token position from index, offset according to PTP vs NTP
-                PTP = new_i < len(p_idxs)
                 if PTP: new_pos = p_idxs[new_i] - 1
                 else:   new_pos = n_idxs[new_i - len(p_idxs)] + 1
 
