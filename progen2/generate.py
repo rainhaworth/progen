@@ -140,7 +140,7 @@ def main():
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--max-window', type=int, default=256)
+    parser.add_argument('--max-window', type=int, default=-1)
     args = parser.parse_args()
 
 
@@ -186,7 +186,10 @@ def main():
     max_steps = args.max_steps
     rw = args.rep_window
     rp = args.rep_penalty
-    max_w = args.max_window
+    if args.max_window != -1:
+        max_w = args.max_window
+    else:
+        max_w = max_steps
 
     # sample_fn input: logits, output: (index along logits dim=0, token ID)
     if args.sample == 'nucleus':
@@ -220,7 +223,7 @@ def main():
                 # normal inference for short sequences
                 if seq.size(1) <= max_w:
                     # make mask, call model, squeeze batch dim to make life easier
-                    mask = make_inference_mask(seq.size(1), idxs, device)
+                    mask = make_inference_mask(seq.size(1), idxs, device, max_w)
                     logits = model(seq, attention_mask=mask).logits
                     logits = torch.squeeze(logits, 0)
 
@@ -231,12 +234,12 @@ def main():
 
                 # two separate model calls for long sequences
                 else:
-                    mask_L = make_inference_mask(max_w, idxs[idxs < max_w], device)
+                    mask_L = make_inference_mask(max_w, idxs[idxs < max_w], device, max_w)
                     logits_L = model(seq[:,:max_w], attention_mask=mask_L).logits.squeeze(0)
 
                     off_R = seq.size(1) - max_w
                     idxs_R = idxs - off_R
-                    mask_R = make_inference_mask(max_w, idxs_R[idxs_R >= 0], device)
+                    mask_R = make_inference_mask(max_w, idxs_R[idxs_R >= 0], device, max_w)
                     logits_R = model(seq[:,off_R:], attention_mask=mask_R).logits.squeeze(0)
 
                     # convert n_idxs to logits_R space; preserve original n_idxs so we can use it to retrieve position
