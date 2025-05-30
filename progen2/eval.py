@@ -1,4 +1,4 @@
-# generation script modified from sample.py
+# eval script modified from sample.py
 
 # Copyright (c) 2022, salesforce.com, inc.
 # All rights reserved.
@@ -17,11 +17,10 @@ from tokenizers import Tokenizer
 from models.progen.modeling_flexible import ProGenForCausalLM
 
 # import custom dataset
-from models.progen.data import ProteinBindingOnlyData
+from models.progen.data import make_gen_from_ext
 from models.progen.mask import idx_to_segments
 
 from tqdm import tqdm
-
 
 ########################################################################
 # util
@@ -173,138 +172,26 @@ def main():
     # load dataset
 
     with print_time('loading datasets'):
-        dataset = ProteinBindingOnlyData(args.data, tokenizer, max_samples=15)
-        dataloader = torch.utils.data.DataLoader(dataset)
+        dataset = make_gen_from_ext(args.data)
 
-    # (4) generate
+    # (4) eval
 
     PAD_ID = 0
     BOS_ID = 1
     EOS_ID = 2
     MAX_ID = 29
 
-    max_steps = args.max_steps
-    rw = args.rep_window
-    rp = args.rep_penalty
-    if args.max_window != -1:
-        max_w = args.max_window
-    else:
-        max_w = max_steps
+    with print_time('evaluating'):
+        i = 0
+        for seq, _ in dataset:
+            print('seq:', seq)
 
-    # sample_fn input: logits, output: (index along logits dim=0, token ID)
-    if args.sample == 'nucleus':
-        sample_fn = nucleus_sample
-    else:
-        sample_fn = greedy_sample
+            idxs = list(range(len(seq)))
 
-    model.eval()
-
-    with print_time('generating'):
-        for seq, idxs in dataloader:
-            print('binding site:\t', tokenizer.decode(seq.squeeze(0).numpy()))
-            print('idxs:\t\t', idxs.squeeze().numpy().tolist())
-            # put everything on the GPU
-            seq = seq.to(device)
-            idxs = idxs.to(device)
-
-            idxs = idxs.squeeze(0)
-
-            for _ in tqdm(range(max_steps)):
-                # get segments; use copy of idxs so we don't have weird memory issues
-                segments = idx_to_segments(idxs.detach().clone())
-
-                # get PTP/NTP indices
-                p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] != BOS_ID]
-                n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] != EOS_ID]
-
-                # stop inference if we have no valid steps
-                if len(n_idxs) == 0 and len(p_idxs) == 0: break
-
-                # normal inference for short sequences
-                if seq.size(1) <= max_w:
-                    # make mask, call model, squeeze batch dim to make life easier
-                    mask = make_inference_mask(seq.size(1), idxs, device, max_w)
-                    logits = model(seq, attention_mask=mask).logits
-                    logits = torch.squeeze(logits, 0)
-
-                    # get PTP/NTP logits
-                    half_sz = logits.size(-1) // 2
-                    p_logits = logits[p_idxs,:half_sz]
-                    n_logits = logits[n_idxs,half_sz:]
-
-                # two separate model calls for long sequences
-                else:
-                    mask_L = make_inference_mask(max_w, idxs[idxs < max_w], device, max_w)
-                    logits_L = model(seq[:,:max_w], attention_mask=mask_L).logits.squeeze(0)
-
-                    off_R = seq.size(1) - max_w
-                    idxs_R = idxs - off_R
-                    mask_R = make_inference_mask(max_w, idxs_R[idxs_R >= 0], device, max_w)
-                    logits_R = model(seq[:,off_R:], attention_mask=mask_R).logits.squeeze(0)
-
-                    # convert n_idxs to logits_R space; preserve original n_idxs so we can use it to retrieve position
-                    n_idxs_R = [i-off_R for i in n_idxs]
-
-                    half_sz = logits_L.size(-1) // 2 # should be identical to logits_R.size(-1)
-                    p_logits = logits_L[p_idxs,:half_sz]
-                    n_logits = logits_R[n_idxs_R,half_sz:]
-
-                # concat logits
-                logits = torch.concat([p_logits, n_logits])  
-
-                # apply repetition penalties; can probably do this faster but with window=4 it's fine
-                p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
-                n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
-                penalties = torch.ones_like(logits)
-                for i, pens in enumerate(p_penalties + n_penalties):
-                    for p in pens:
-                        penalties[i, p] = rp
-                logits = logits / penalties
-
-                # compute (numerically stable) softmax over all logits representing viable next steps
-                exp_logits = torch.exp(logits - torch.max(logits))
-                sum_exp_logits = torch.sum(exp_logits)
-                logits = exp_logits / sum_exp_logits
-
-                # sample next step (index, token) from logits
-                while True:
-                    new_i, new_token = sample_fn(logits)
-                    PTP = new_i < len(p_idxs)
-
-                    # enforce no invalid tokens
-                    if new_token == PAD_ID or new_token > MAX_ID: continue
-                    if PTP and new_token == EOS_ID: continue
-                    if not PTP and new_token == BOS_ID: continue
-
-                    break
-
-                # get new token position from index, offset according to PTP vs NTP
-                if PTP: new_pos = p_idxs[new_i] - 1
-                else:   new_pos = n_idxs[new_i - len(p_idxs)] + 1
-
-                # finally, update seq and idxs
-                new_token = new_token[None,None]
-                if new_pos == -1:
-                    # prepend, shift all indices up
-                    seq = torch.cat([new_token, seq], dim=-1)
-                    idxs = torch.cat([new_pos[None], idxs])
-                    idxs += 1
-                elif new_pos == seq.size(1):
-                    # append
-                    seq = torch.cat([seq, new_token], dim=-1)
-                    idxs = torch.cat([idxs, new_pos[None]])
-                else:
-                    # insert
-                    seq[:,new_pos] = new_token
-                    idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
-                    idxs = idxs.sort()[0]
-
-                # debugging
-                #print(idxs.numpy(force=True), seq.shape)
-                #print(tokenizer.decode(seq.squeeze().numpy(force=True)))
-            print('generated:\t', tokenizer.decode(seq.squeeze().numpy(force=True)))
-
-            # compute CE as mean across prev and next predictions
+            seq = tokenizer.encode(seq).ids
+            seq = torch.tensor(seq).to(device)
+            seq = seq[None,:]
+            
             mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
             logits = model(seq, attention_mask=mask).logits
             logits = torch.squeeze(logits, 0)
@@ -321,7 +208,8 @@ def main():
 
             print('CE:\t', ce)
             print('PPL:\t', 2 ** ce, end='\n\n')
-
+            i += 1
+            if i > 10: break
 
 if __name__ == '__main__':
     main()
