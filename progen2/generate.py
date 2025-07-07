@@ -23,6 +23,12 @@ from models.progen.mask import idx_to_segments
 from tqdm import tqdm
 
 
+PAD_ID = 0
+BOS_ID = 1
+EOS_ID = 2
+VALID_AAS = 'ACDEFGHIKLMNPQRSTVWY' # restrict generation to 20 standard amino acids
+
+
 ########################################################################
 # util
 
@@ -110,6 +116,78 @@ def nucleus_sample(logits, p=0.95):
     idx_flat = torch.multinomial(logits_rescaled.flatten(), 1)[0]
     return idx_flat // logits.shape[1], idx_flat % logits.shape[1]
 
+# full generation step
+def gen_step(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=nucleus_sample, return_logits=False):
+    # get segments; use copy of idxs so we don't have weird memory issues
+    segments = idx_to_segments(idxs.detach().clone())
+
+    # get PTP/NTP indices
+    p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] not in [BOS_ID, BOS_ID+2]]
+    n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] not in [EOS_ID, EOS_ID+2]]
+    
+    #print(p_idxs, seq[:,p_idxs[0]], n_idxs, seq[:,n_idxs[0]])
+
+    # stop inference if we have no valid steps
+    if len(n_idxs) == 0 and len(p_idxs) == 0: return None, None
+
+    # make mask, call model, squeeze batch dim to make life easier
+    mask = make_inference_mask(seq.size(1), idxs, device, seq.size(1))
+    logits = model(seq, attention_mask=mask).logits
+    logits = torch.squeeze(logits, 0)
+
+    # get PTP/NTP logits
+    half_sz = logits.size(-1) // 2
+    p_logits = logits[p_idxs,:half_sz]
+    n_logits = logits[n_idxs,half_sz:]
+
+    # concat logits
+    logits = torch.concat([p_logits, n_logits])  
+
+    # apply repetition penalties; can probably do this faster but with window=4 it's fine
+    p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
+    n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
+    penalties = torch.ones_like(logits)
+    for i, pens in enumerate(p_penalties + n_penalties):
+        for p in pens:
+            penalties[i, p] = rp
+    logits = logits / penalties
+
+    # make + apply logit mask so we don't generate invalid tokens
+    drop_val = -1e9
+    mask = torch.zeros_like(logits)
+    mask[:,invalid_ids] = drop_val
+    # if we can predict BOS, allow
+    if len(p_idxs) > 0 and p_idxs[0] == 0:
+        mask[0, [BOS_ID, BOS_ID+2]] = 0
+    # same for EOS
+    if len(n_idxs) > 0 and n_idxs[-1] == seq.size(1) - 1:
+        mask[-1, [EOS_ID, EOS_ID+2]] = 0
+    logits += mask
+    
+    # see if we have a likely EOS
+    EOS_prob = torch.sum(logits[-1, [EOS_ID, EOS_ID+2]])/torch.sum(logits)
+    if EOS_prob > 1e-8: print('EOS weight:', EOS_prob)
+
+    # compute (numerically stable) softmax over all logits representing viable next steps
+    exp_logits = torch.exp(logits - torch.max(logits))
+    sum_exp_logits = torch.sum(exp_logits)
+    logits = exp_logits / sum_exp_logits
+
+    if return_logits: return logits, None
+
+    # sample next step (index, token) from logits
+    new_i, new_token = sample_fn(logits)
+    PTP = new_i < len(p_idxs)
+
+    # print terminals
+    if new_token in [1,2,3,4]: print(new_token, PTP)
+
+    # get new token position from index, offset according to PTP vs NTP
+    if PTP: new_pos = p_idxs[new_i] - 1
+    else:   new_pos = n_idxs[new_i - len(p_idxs)] + 1
+
+    return new_token, new_pos
+
 ########################################################################
 # main
 
@@ -140,7 +218,6 @@ def main():
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
-    parser.add_argument('--max-window', type=int, default=-1)
     args = parser.parse_args()
 
 
@@ -170,6 +247,11 @@ def main():
     with print_time('loading tokenizer'):
         tokenizer = create_tokenizer_custom(file='tokenizer.json')
 
+        # get valid token IDs; does not work with proper BPE
+        # this excludes terminals, which are handled later
+        valid_ids = tokenizer.encode(VALID_AAS).ids
+        invalid_ids = [x for x in range(32) if x not in valid_ids]
+
     # load dataset
 
     with print_time('loading datasets'):
@@ -178,18 +260,9 @@ def main():
 
     # (4) generate
 
-    PAD_ID = 0
-    BOS_ID = 1
-    EOS_ID = 2
-    MAX_ID = 29
-
     max_steps = args.max_steps
     rw = args.rep_window
     rp = args.rep_penalty
-    if args.max_window != -1:
-        max_w = args.max_window
-    else:
-        max_w = max_steps
 
     # sample_fn input: logits, output: (index along logits dim=0, token ID)
     if args.sample == 'nucleus':
@@ -200,6 +273,7 @@ def main():
     model.eval()
 
     with print_time('generating'):
+        ppls = []
         for seq, idxs in dataloader:
             print('binding site:\t', tokenizer.decode(seq.squeeze(0).numpy()))
             print('idxs:\t\t', idxs.squeeze().numpy().tolist())
@@ -210,79 +284,11 @@ def main():
             idxs = idxs.squeeze(0)
 
             for _ in tqdm(range(max_steps)):
-                # get segments; use copy of idxs so we don't have weird memory issues
-                segments = idx_to_segments(idxs.detach().clone())
+                # generate next token if possible
+                new_token, new_pos = gen_step(model, seq, idxs, device, invalid_ids, rp, rw, sample_fn)
+                if new_token == None: break
 
-                # get PTP/NTP indices
-                p_idxs = [seg[0] for seg in segments if seq[:,seg[0]] != BOS_ID]
-                n_idxs = [seg[1] for seg in segments if seq[:,seg[1]] != EOS_ID]
-
-                # stop inference if we have no valid steps
-                if len(n_idxs) == 0 and len(p_idxs) == 0: break
-
-                # normal inference for short sequences
-                if seq.size(1) <= max_w:
-                    # make mask, call model, squeeze batch dim to make life easier
-                    mask = make_inference_mask(seq.size(1), idxs, device, max_w)
-                    logits = model(seq, attention_mask=mask).logits
-                    logits = torch.squeeze(logits, 0)
-
-                    # get PTP/NTP logits
-                    half_sz = logits.size(-1) // 2
-                    p_logits = logits[p_idxs,:half_sz]
-                    n_logits = logits[n_idxs,half_sz:]
-
-                # two separate model calls for long sequences
-                else:
-                    mask_L = make_inference_mask(max_w, idxs[idxs < max_w], device, max_w)
-                    logits_L = model(seq[:,:max_w], attention_mask=mask_L).logits.squeeze(0)
-
-                    off_R = seq.size(1) - max_w
-                    idxs_R = idxs - off_R
-                    mask_R = make_inference_mask(max_w, idxs_R[idxs_R >= 0], device, max_w)
-                    logits_R = model(seq[:,off_R:], attention_mask=mask_R).logits.squeeze(0)
-
-                    # convert n_idxs to logits_R space; preserve original n_idxs so we can use it to retrieve position
-                    n_idxs_R = [i-off_R for i in n_idxs]
-
-                    half_sz = logits_L.size(-1) // 2 # should be identical to logits_R.size(-1)
-                    p_logits = logits_L[p_idxs,:half_sz]
-                    n_logits = logits_R[n_idxs_R,half_sz:]
-
-                # concat logits
-                logits = torch.concat([p_logits, n_logits])  
-
-                # apply repetition penalties; can probably do this faster but with window=4 it's fine
-                p_penalties = [[seq[:,i] for i in range(p_i, p_i+rw) if i in idxs] for p_i in p_idxs]
-                n_penalties = [[seq[:,i] for i in range(n_i-rw+1, n_i+1) if i in idxs] for n_i in n_idxs]
-                penalties = torch.ones_like(logits)
-                for i, pens in enumerate(p_penalties + n_penalties):
-                    for p in pens:
-                        penalties[i, p] = rp
-                logits = logits / penalties
-
-                # compute (numerically stable) softmax over all logits representing viable next steps
-                exp_logits = torch.exp(logits - torch.max(logits))
-                sum_exp_logits = torch.sum(exp_logits)
-                logits = exp_logits / sum_exp_logits
-
-                # sample next step (index, token) from logits
-                while True:
-                    new_i, new_token = sample_fn(logits)
-                    PTP = new_i < len(p_idxs)
-
-                    # enforce no invalid tokens
-                    if new_token == PAD_ID or new_token > MAX_ID: continue
-                    if PTP and new_token == EOS_ID: continue
-                    if not PTP and new_token == BOS_ID: continue
-
-                    break
-
-                # get new token position from index, offset according to PTP vs NTP
-                if PTP: new_pos = p_idxs[new_i] - 1
-                else:   new_pos = n_idxs[new_i - len(p_idxs)] + 1
-
-                # finally, update seq and idxs
+                # update seq and idxs
                 new_token = new_token[None,None]
                 if new_pos == -1:
                     # prepend, shift all indices up
@@ -299,9 +305,6 @@ def main():
                     idxs = torch.cat([idxs, new_pos[None]]).sort()[0]
                     idxs = idxs.sort()[0]
 
-                # debugging
-                #print(idxs.numpy(force=True), seq.shape)
-                #print(tokenizer.decode(seq.squeeze().numpy(force=True)))
             print('generated:\t', tokenizer.decode(seq.squeeze().numpy(force=True)))
 
             # compute CE as mean across prev and next predictions
@@ -321,6 +324,8 @@ def main():
 
             print('CE:\t', ce)
             print('PPL:\t', 2 ** ce, end='\n\n')
+            ppls.append(2**ce)
+        print('mean PPL:', np.mean(ppls))
 
 
 if __name__ == '__main__':

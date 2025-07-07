@@ -15,7 +15,7 @@ def fasta_gen(file):
                     continue
                 yield seq, None
                 seq = ''
-            seq += line.strip()
+            else: seq += line.strip()
 
 # TSV reader (for UniProt ID mapper output w/ binding sites)
 def tsv_gen(file):
@@ -192,6 +192,9 @@ class ProteinBindingOnlyData(Dataset):
             sample_count += 1
             if sample_count >= max_samples:
                 break
+        # reverse order (temporary)
+        self.seqs = self.seqs[::-1]
+        self.idxs = self.idxs[::-1]
 
     def __len__(self):
         return len(self.seqs)
