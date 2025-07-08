@@ -2,20 +2,15 @@ import torch
 from torch.utils.data import Dataset
 import csv
 import numpy as np
+from Bio import SeqIO
 
 from .mask import idx_to_mask_start, rand_mask_start
 
 # FASTA reader
 def fasta_gen(file):
     with open(file) as f:
-        seq = ''
-        for line in f:
-            if len(line) == 0 or line[0] == '>':
-                if len(seq) == 0:
-                    continue
-                yield seq, None
-                seq = ''
-            else: seq += line.strip()
+        for record in SeqIO.parse(f, 'fasta'):
+            yield str(record.seq), None
 
 # TSV reader (for UniProt ID mapper output w/ binding sites)
 def tsv_gen(file):
@@ -96,6 +91,8 @@ class ProteinBindingData(Dataset):
             seq = tokenizer.encode(seq).ids
             # add BOS, EOS; see tokenizer.json
             seq = [1] + seq + [2]
+            # drop very short sequences
+            if len(seq) < 20: continue
             # store
             self.seqs.append(torch.tensor(seq))
             self.idxs.append(idx)

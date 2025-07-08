@@ -96,7 +96,7 @@ def main():
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--max-length', type=int, default=256)
+    parser.add_argument('--max-length', type=int, default=512)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
@@ -137,8 +137,8 @@ def main():
     def make_dataloader(dataset):
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
-    with print_time('loading up to ' + str(args.max_samples) + ' samples'):
-        train_dataset = ProteinBindingData(args.train, tokenizer, max_samples=args.max_samples)
+    with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.train):
+        train_dataset = ProteinBindingData(args.train, tokenizer, max_dim=args.max_length, max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
 
         eval_dataloader = None

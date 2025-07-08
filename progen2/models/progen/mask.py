@@ -186,7 +186,7 @@ def idx_to_mask_start(idx, seqlen, dim=512, pathfn=idx_to_path_targets_largest):
 # just_binding arg: skip making the mask, just return the binding site
 def rand_mask_start(seqlen, dim=512, exp_sz=5, p_drop=0.2, just_binding=False):
     # generate artificial binding site position
-    sz = max(1, np.random.poisson(exp_sz))
+    sz = min(max(1, np.random.poisson(exp_sz)), seqlen-1)
     keep_idx = np.random.random(sz) > p_drop
     if np.sum(keep_idx) == 0:
         keep_idx[0] = True
