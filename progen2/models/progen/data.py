@@ -201,3 +201,84 @@ class ProteinBindingOnlyData(Dataset):
         idxs = self.idxs[idx]
 
         return seq, idxs
+
+
+# masked LM
+class MaskedProteinData(Dataset):
+    def __init__(self, file, tokenizer, max_dim=512, max_samples=1000):
+        # masking stuff
+        self.beta = torch.distributions.beta.Beta(torch.tensor([3.0]), torch.tensor([9.0]))
+        self.uniform = torch.distributions.uniform.Uniform(torch.tensor([0.0]), torch.tensor([1.0]))
+
+        self.max_dim = max_dim
+        # load entire dataset into working memory
+        # if you want to use a big dataset rewrite as iterable
+        self.seqs = []
+        #self.idxs = []
+
+        # get generator
+        gen = make_gen_from_ext(file)
+
+        # fetch all sequences and binding sites if available
+        sample_count = 0
+        for seq, idx in gen:
+            # tokenize
+            seq = tokenizer.encode(seq).ids
+            # add BOS, EOS; see tokenizer.json
+            seq = [1] + seq + [2]
+            # drop very short sequences
+            if len(seq) < 20: continue
+            # store
+            self.seqs.append(torch.tensor(seq))
+            #self.idxs.append(idx)
+
+            # have we hit max_samples?
+            sample_count += 1
+            if sample_count >= max_samples:
+                break
+
+    def __len__(self):
+        return len(self.seqs)
+
+    def __getitem__(self, idx):
+        seq = self.seqs[idx]
+        #idxs = self.idxs[idx]
+
+        # if sequence is bigger than max_dim, take random subsequence
+        offset = 0
+        if len(seq) > self.max_dim:
+            min_idx = 0
+            max_idx = len(seq) - self.max_dim
+            # compute offset
+            offset = np.random.randint(min_idx, max_idx)
+            # update seq
+            seq = seq[offset : offset + self.max_dim]
+        
+        # make masked sequence
+        seq_mask = seq.clone()
+
+        # compute number of positions to mask for weird ESM masking scheme
+        choice = self.uniform.sample()
+        if choice > 0.8:
+            frac = self.uniform.sample()
+        else:
+            frac = self.beta.sample()
+        n_mask = (len(seq) * frac).int()
+
+        # get indices to mask
+        mask_idx = torch.randperm(len(seq))[:n_mask]
+
+        # apply; use 3 = <mask> because it's unused
+        seq_mask[mask_idx] = 3
+
+        # make target sequence that ignores all non-masked positions
+        seq_tgt = torch.zeros(self.max_dim, dtype=int) - 100
+        seq_tgt[mask_idx] = seq[mask_idx]
+
+        # pad sequences
+        if len(seq_mask) < self.max_dim:
+            #seq = torch.cat(( seq, torch.zeros(self.max_dim - len(seq)) )).to(int)
+            seq_mask = torch.cat(( seq_mask, torch.zeros(self.max_dim - len(seq_mask)) )).to(int)
+        #mask_idx = torch.cat(( mask_idx, torch.zeros(self.max_dim - len(mask_idx)) )).to(int)
+
+        return seq_tgt, seq_mask#, mask_idx
