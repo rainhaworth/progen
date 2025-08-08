@@ -31,6 +31,8 @@ from transformers.utils import logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from .configuration_progen import ProGenConfig
 
+from .swiglu import SwiGLU
+
 
 logger = logging.get_logger(__name__)
 
@@ -257,10 +259,10 @@ class ProGenMLP(nn.Module):
         super().__init__()
         embed_dim = config.n_embd
 
-        self.fc_in = nn.Linear(embed_dim, intermediate_size)
+        self.fc_in = nn.Linear(embed_dim, intermediate_size * 2)
         self.fc_out = nn.Linear(intermediate_size, embed_dim)
 
-        self.act = ACT2FN[config.activation_function]
+        self.act = SwiGLU()#ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, hidden_states):
