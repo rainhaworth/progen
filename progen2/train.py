@@ -14,10 +14,12 @@ import argparse
 import torch
 
 from tokenizers import Tokenizer
-from models.progen.modeling_esmlike import ProGenForCausalLM
+from models.progen.modeling_flexible import ProGenForCausalLM
+from models.progen.configuration_progen import ProGenConfig
+import json
 
 # import custom dataset
-from models.progen.data import MaskedProteinData
+from models.progen.data import ProteinBindingData
 
 # it looks like they were already doing their own native pytorch stuff here
 # so let's do native pytorch training
@@ -78,19 +80,11 @@ def create_tokenizer_custom(file):
 
 
 def main():
-
-    # (0) constants
-
-    models_151M = [ 'progen2-small' ]
-    models_754M = [ 'progen2-medium', 'progen2-oas', 'progen2-base' ]
-    models_2B = [ 'progen2-large', 'progen2-BFD90' ]
-    models_6B = [ 'progen2-xlarge' ]
-    models = models_151M + models_754M + models_2B + models_6B
     
     # (1) params
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, choices=models, default='progen2-small')
+    parser.add_argument('--config', type=str, default='config-1.4b')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
@@ -116,7 +110,7 @@ def main():
         args.device = 'cpu'
 
     device = torch.device(args.device)
-    ckpt = f'/fs/nexus-scratch/rhaworth/models/progen/{args.model}' #f'./checkpoints/{args.model}'
+    configf = f'./{args.config}.json'
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -125,7 +119,23 @@ def main():
     # (3) load
 
     with print_time('loading parameters'):
-        model = create_model(ckpt=ckpt, fp16=args.fp16).to(device)
+        with open(configf, 'r') as f:
+            cj = json.load(f)
+        config = ProGenConfig(
+            cj['vocab_size'],
+            cj['n_positions'],
+            cj['n_ctx'],
+            cj['n_embd'],
+            cj['n_layer'],
+            cj['n_head'],
+            resid_pdrop=cj['resid_pdrop'],
+            embd_pdrop=cj['embd_pdrop'],
+            attn_pdrop=cj['embd_pdrop'],
+            use_cache=False,
+            bos_token_id=1,
+            eos_token_id=2
+        )
+        model = ProGenForCausalLM(config)#create_model(ckpt=ckpt, fp16=args.fp16).to(device)
 
 
     with print_time('loading tokenizer'):
@@ -138,15 +148,20 @@ def main():
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.train):
-        train_dataset = MaskedProteinData(args.train, tokenizer, max_dim=args.max_length, max_samples=args.max_samples)
+        train_dataset = ProteinBindingData(args.train, tokenizer, max_dim=args.max_length, max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
+
+        eval_dataloader = None
+        if args.eval != '':
+            eval_dataset = ProteinBindingData(args.eval, tokenizer)
+            eval_dataloader = make_dataloader(eval_dataset)
 
     print('train samples found:', len(train_dataset))
 
     # (4) configure training
 
     # default settings from https://huggingface.co/docs/transformers/v4.46.2/en/training
-    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
     num_epochs = 3
     num_training_steps = num_epochs * len(train_dataloader)
 
@@ -165,31 +180,37 @@ def main():
     with print_time('training'):
         for epoch in range(num_epochs):
             print('epoch', epoch)
-            final_loss = 0
-            for seqs_gt, seqs_masked in train_dataloader:
+            total_loss = 0
+            batches = 0
+            for seqs, attns, offsets, targets in train_dataloader:
                 # put everything on the GPU
-                seqs_gt = seqs_gt.to(device)
-                seqs_masked = seqs_masked.to(device)
-                #masked_idxs = masked_idxs.to(device)
+                seqs = seqs.to(device)
+                attns = attns.to(device)
+                offsets = offsets.to(device) # TODO: remove if remains unused
+                targets = targets.to(device)
 
-                logits = model(seqs_masked).logits
+                logits = model(seqs,
+                                attention_mask=attns,
+                                pos_offsets=offsets).logits
 
                 # squish logits + targets, compute loss
-                loss = loss_fn(logits.view(-1, logits.size(-1)), seqs_gt.view(-1))
+                # TODO: retrieve original lm_head size somehow instead of doing this
+                loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
                 loss.backward()
 
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 
-                # print + update loss; if running in batch and you want granular loss info, remove `end='\r'`
-                print('loss: {:.5f}'.format(loss.item()), end='\r')
-                final_loss = loss.item()
-            print('end of epoch loss: {:.5f}\n'.format(final_loss))
+                # print + update loss; if you want the full loss curve over the epoch, remove `end='\r'`
+                total_loss += loss.item()
+                batches += 1
+                print('loss: {:.5f}'.format(total_loss / batches), end='\r')
+            print('loss: {:.5f}\n'.format(total_loss / batches))
             
     # (6) save weights
 
-    save_path = os.path.join(args.save, 'model-esmlike.pt')
+    save_path = os.path.join(args.save, 'model.pt')
     torch.save(model, save_path)
     print('saved to', save_path, end='\n\n')
 

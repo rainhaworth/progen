@@ -1,0 +1,11 @@
+{
+    "n_layer": 48,
+    "n_embd": 1536,
+    "n_head": 24,
+    "n_positions": 2048,
+    "n_ctx": 2048,
+    "vocab_size": 32,
+    "attn_pdrop": 0.1,
+    "resid_pdrop": 0.1,
+    "embd_pdrop": 0.1
+}
