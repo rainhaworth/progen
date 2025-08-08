@@ -26,7 +26,7 @@ from torch.nn import CrossEntropyLoss
 
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from transformers.modeling_utils import PreTrainedModel, GenerationMixin
+from transformers.modeling_utils import PreTrainedModel#, GenerationMixin
 from transformers.utils import logging
 from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
 from .configuration_progen import ProGenConfig
@@ -578,7 +578,7 @@ class ProGenModel(ProGenPreTrainedModel):
         )
 
 # added GenerationMixin just to get rid of the warning; probably won't use
-class ProGenForCausalLM(ProGenPreTrainedModel, GenerationMixin):
+class ProGenForCausalLM(ProGenPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"h\.\d+\.attn\.masked_bias", r"h\.\d+\.attn\.bias", r"lm_head\.weight"]
 
     def __init__(self, config):
