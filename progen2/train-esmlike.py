@@ -90,7 +90,7 @@ def main():
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--max-length', type=int, default=512)
+    parser.add_argument('--max-length', type=int, default=2048)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
@@ -166,15 +166,16 @@ def main():
     
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    model.to(device)    
+    scaler = torch.GradScaler()
+
+    model.to(device)
 
     # (5) train
 
     model.train()
 
-    with print_time('training'):
-        for epoch in range(num_epochs):
-            print('epoch', epoch)
+    for epoch in range(num_epochs):
+        with print_time('epoch ' + str(epoch)):
             total_loss = 0
             batches = 0
             for seqs_gt, seqs_masked in train_dataloader:
@@ -183,13 +184,16 @@ def main():
                 seqs_masked = seqs_masked.to(device)
                 #masked_idxs = masked_idxs.to(device)
 
-                logits = model(seqs_masked).logits
+                with torch.amp.autocast(device.type):
+                    logits = model(seqs_masked).logits
 
-                # squish logits + targets, compute loss
-                loss = loss_fn(logits.view(-1, logits.size(-1)), seqs_gt.view(-1))
-                loss.backward()
+                    # squish logits + targets, compute loss
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), seqs_gt.view(-1))
+                
+                scaler.scale(loss).backward()
 
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 

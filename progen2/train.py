@@ -90,7 +90,7 @@ def main():
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--max-length', type=int, default=512)
+    parser.add_argument('--max-length', type=int, default=2048)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
@@ -170,6 +170,8 @@ def main():
             )
     
     loss_fn = torch.nn.CrossEntropyLoss()
+    
+    scaler = torch.GradScaler()
 
     model.to(device)    
 
@@ -177,9 +179,9 @@ def main():
 
     model.train()
 
-    with print_time('training'):
-        for epoch in range(num_epochs):
-            print('epoch', epoch)
+    
+    for epoch in range(num_epochs):
+        with print_time('epoch ' + str(epoch)):
             total_loss = 0
             batches = 0
             for seqs, attns, offsets, targets in train_dataloader:
@@ -188,17 +190,19 @@ def main():
                 attns = attns.to(device)
                 offsets = offsets.to(device) # TODO: remove if remains unused
                 targets = targets.to(device)
+                
+                with torch.amp.autocast(device.type):
+                    logits = model(seqs,
+                                    attention_mask=attns,
+                                    pos_offsets=offsets).logits
 
-                logits = model(seqs,
-                                attention_mask=attns,
-                                pos_offsets=offsets).logits
+                    # squish logits + targets, compute loss
+                    # TODO: retrieve original lm_head size somehow instead of doing this
+                    loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
+                scaler.scale(loss).backward()
 
-                # squish logits + targets, compute loss
-                # TODO: retrieve original lm_head size somehow instead of doing this
-                loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
-                loss.backward()
-
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 
