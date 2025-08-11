@@ -96,7 +96,10 @@ def main():
     parser.add_argument('--eval', type=str, default='')
     parser.add_argument('--save', type=str, default='./weights')
     parser.add_argument('--bsz', type=int, default=8)
-    parser.add_argument('--max_samples', type=int, default=1000)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--max-samples', type=int, default=1000)
+    parser.add_argument('--save-every', type=int, default=100000)
+    parser.add_argument('--ckpt', type=str, default='')
     args = parser.parse_args()
 
 
@@ -111,6 +114,7 @@ def main():
 
     device = torch.device(args.device)
     configf = f'./{args.config}.json'
+    ckpt = args.ckpt
 
     if device.type == 'cpu':
         print('falling back to fp32')
@@ -136,6 +140,21 @@ def main():
             eos_token_id=2
         )
         model = ProGenForCausalLM(config)#create_model(ckpt=ckpt, fp16=args.fp16).to(device)
+        
+        if ckpt != '' and os.path.exists(ckpt):
+            print('loading from checkpoint')
+            states = torch.load(ckpt, map_location=device.type)#, map_location='cpu')
+            start_step = states['step']
+            model.load_state_dict(states['model_state'])
+        else:
+            print('training from scratch')
+            start_step = 0
+            states = None
+        
+        # optimizer ends up on cpu if we don't declare after model.to(device) when resuming from checkpoint
+        model.to(device)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
+        if states is not None: optimizer.load_state_dict(states['optim_state'])
 
 
     with print_time('loading tokenizer'):
@@ -155,18 +174,16 @@ def main():
 
     # (4) configure training
 
-    # default settings from https://huggingface.co/docs/transformers/v4.46.2/en/training
-    optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
-    num_epochs = 3
+    num_epochs = args.epochs
     num_training_steps = num_epochs * len(train_dataloader)
 
     lr_scheduler = get_scheduler(
-            name='linear', optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
+            name='linear', optimizer=optimizer, num_warmup_steps=5000, num_training_steps=num_training_steps
             )
     
     loss_fn = torch.nn.CrossEntropyLoss()
 
-    scaler = torch.GradScaler()
+    scaler = torch.GradScaler(device.type)
 
     model.to(device)
 
@@ -174,6 +191,8 @@ def main():
 
     model.train()
 
+    step_count = 0
+    save_every = args.save_every
     for epoch in range(num_epochs):
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
@@ -201,6 +220,17 @@ def main():
                 total_loss += loss.item()
                 batches += 1
                 print('loss: {:.5f}'.format(total_loss / batches), end='\r')
+                
+                # save every N steps
+                if step_count != start_step and step_count % save_every == 0:
+                    save_path = os.path.join(args.save, 'train-esmlike-step' + str(step_count) + '.pt')
+                    torch.save({
+                        'step': step_count,
+                        'model_state': model.state_dict(),
+                        'optim_state': optimizer.state_dict()
+                    }, save_path)
+                    print('saved to', save_path)
+                step_count += 1
 
                 # uncomment to print memory usage; i assume this has to be after the backprop pass
                 #t = torch.cuda.get_device_properties(device).total_memory
