@@ -84,18 +84,18 @@ def main():
     # (1) params
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='config-1.4b')
+    parser.add_argument('--config', type=str, default='config-medium')
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--rng-seed', type=int, default=42)
     parser.add_argument('--rng-deterministic', default=True, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--p', type=float, default=0.95)
     parser.add_argument('--t', type=float, default=0.2)
-    parser.add_argument('--max-length', type=int, default=2048)
+    #parser.add_argument('--max-length', type=int, default=2048)
     parser.add_argument('--fp16', default=False, type=lambda x: (str(x).lower() == 'true'))
     parser.add_argument('--train', type=str, default='./data/uniprot_sprot.fasta')
     parser.add_argument('--eval', type=str, default='')
     parser.add_argument('--save', type=str, default='./weights')
-    parser.add_argument('--bsz', type=int, default=16)
+    parser.add_argument('--bsz', type=int, default=8)
     parser.add_argument('--max_samples', type=int, default=1000)
     args = parser.parse_args()
 
@@ -148,7 +148,7 @@ def main():
         return torch.utils.data.DataLoader(dataset, batch_size=args.bsz, shuffle=True)
 
     with print_time('loading up to ' + str(args.max_samples) + ' samples from ' + args.train):
-        train_dataset = MaskedProteinData(args.train, tokenizer, max_dim=args.max_length, max_samples=args.max_samples)
+        train_dataset = MaskedProteinData(args.train, tokenizer, max_dim=cj['n_ctx'], max_samples=args.max_samples)
         train_dataloader = make_dataloader(train_dataset)
 
     print('train samples found:', len(train_dataset))
@@ -175,7 +175,7 @@ def main():
     model.train()
 
     for epoch in range(num_epochs):
-        with print_time('epoch ' + str(epoch)):
+        with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
             batches = 0
             for seqs_gt, seqs_masked in train_dataloader:
@@ -189,7 +189,7 @@ def main():
 
                     # squish logits + targets, compute loss
                     loss = loss_fn(logits.view(-1, logits.size(-1)), seqs_gt.view(-1))
-                
+                       
                 scaler.scale(loss).backward()
 
                 scaler.step(optimizer)
@@ -201,7 +201,12 @@ def main():
                 total_loss += loss.item()
                 batches += 1
                 print('loss: {:.5f}'.format(total_loss / batches), end='\r')
-            print('loss: {:.5f}\n'.format(total_loss / batches))
+
+                # uncomment to print memory usage; i assume this has to be after the backprop pass
+                #t = torch.cuda.get_device_properties(device).total_memory
+                #r = torch.cuda.memory_reserved(device)
+                #print(r, t, r/t)
+            print('loss: {:.5f}'.format(total_loss / batches))
             
     # (6) save weights
 
