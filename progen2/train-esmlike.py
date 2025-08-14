@@ -143,7 +143,7 @@ def main():
         
         if ckpt != '' and os.path.exists(ckpt):
             print('loading from checkpoint')
-            states = torch.load(ckpt, map_location=device.type)#, map_location='cpu')
+            states = torch.load(ckpt, map_location='cpu')
             start_step = states['step']
             model.load_state_dict(states['model_state'])
         else:
@@ -236,7 +236,7 @@ def main():
                 #t = torch.cuda.get_device_properties(device).total_memory
                 #r = torch.cuda.memory_reserved(device)
                 #print(r, t, r/t)
-            print('loss: {:.5f}'.format(total_loss / batches))
+            if batches > 0: print('loss: {:.5f}'.format(total_loss / batches))
             
     # (6) save weights
 

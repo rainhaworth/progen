@@ -143,7 +143,7 @@ def main():
         
         if ckpt != '' and os.path.exists(ckpt):
             print('loading from checkpoint')
-            states = torch.load(ckpt, map_location=device.type)#, map_location='cpu')
+            states = torch.load(ckpt, map_location=device.type, map_location='cpu')
             start_step = states['step']
             model.load_state_dict(states['model_state'])
         else:
@@ -243,7 +243,7 @@ def main():
                     }, save_path)
                     print('saved to', save_path)
                 step_count += 1
-            print('loss: {:.5f}'.format(total_loss / batches))
+            if batches > 0: print('loss: {:.5f}'.format(total_loss / batches))
             
     # (6) save final weights
 
