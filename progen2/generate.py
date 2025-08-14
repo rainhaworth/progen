@@ -10,11 +10,13 @@ import time
 import random
 import numpy as np
 import argparse
+import json
 
 import torch
 
 from tokenizers import Tokenizer
 from models.progen.modeling_flexible import ProGenForCausalLM
+from models.progen.configuration_progen import ProGenConfig
 
 # import custom dataset
 from models.progen.data import ProteinBindingOnlyData
@@ -165,8 +167,8 @@ def gen_step(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=n
     logits += mask
     
     # see if we have a likely EOS
-    EOS_prob = torch.sum(logits[-1, [EOS_ID, EOS_ID+2]])/torch.sum(logits)
-    if EOS_prob > 1e-8: print('EOS weight:', EOS_prob)
+    #EOS_prob = torch.sum(logits[-1, [EOS_ID, EOS_ID+2]])/torch.sum(logits)
+    #if EOS_prob > 1e-8: print('EOS weight:', EOS_prob)
 
     # compute (numerically stable) softmax over all logits representing viable next steps
     exp_logits = torch.exp(logits - torch.max(logits))
@@ -180,7 +182,7 @@ def gen_step(model, seq, idxs, device, invalid_ids=[], rp=1.2, rw=4, sample_fn=n
     PTP = new_i < len(p_idxs)
 
     # print terminals
-    if new_token in [1,2,3,4]: print(new_token, PTP)
+    #if new_token in [1,2,3,4]: print(new_token, PTP)
 
     # get new token position from index, offset according to PTP vs NTP
     if PTP: new_pos = p_idxs[new_i] - 1
@@ -218,6 +220,7 @@ def main():
     parser.add_argument('--rep-window', type=int, default=4)
     parser.add_argument('--rep-penalty', type=float, default=1.2)
     parser.add_argument('--sample', choices=['nucleus', 'greedy'], default='nucleus')
+    parser.add_argument('--config', type=str, default='./config-medium.json')
     args = parser.parse_args()
 
 
@@ -242,6 +245,28 @@ def main():
     with print_time('loading model'):
         #model = create_model(ckpt=ckpt, fp16=args.fp16).to(device)
         model = torch.load(args.weights, weights_only=False)
+        # if dict, expect config arg to be provided
+        if type(model) is dict:
+            dt = model
+            with open(args.config, 'r') as f:
+                cj = json.load(f)
+            config = ProGenConfig(
+                cj['vocab_size'],
+                cj['n_positions'],
+                cj['n_ctx'],
+                cj['n_embd'],
+                cj['n_layer'],
+                cj['n_head'],
+                resid_pdrop=cj['resid_pdrop'],
+                embd_pdrop=cj['embd_pdrop'],
+                attn_pdrop=cj['embd_pdrop'],
+                use_cache=False,
+                bos_token_id=1,
+                eos_token_id=2
+            )
+            model = ProGenForCausalLM(config)
+            model.load_state_dict(dt['model_state'])
+            model.to(device)
 
 
     with print_time('loading tokenizer'):
