@@ -211,6 +211,10 @@ def main():
                        
                 scaler.scale(loss).backward()
 
+                # unscale then apply gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
                 lr_scheduler.step()

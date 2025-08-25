@@ -143,7 +143,7 @@ def main():
         
         if ckpt != '' and os.path.exists(ckpt):
             print('loading from checkpoint')
-            states = torch.load(ckpt, map_location=device.type, map_location='cpu')
+            states = torch.load(ckpt, map_location='cpu')
             start_step = states['step']
             model.load_state_dict(states['model_state'])
         else:
@@ -196,6 +196,7 @@ def main():
 
     step_count = 0
     save_every = args.save_every
+    print_every = 1000
     for epoch in range(num_epochs):
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
@@ -223,6 +224,10 @@ def main():
                     loss = loss_fn(logits.view(-1, logits.size(-1) // 2), targets.view(-1))
                 scaler.scale(loss).backward()
 
+                # unscale then apply gradient clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
                 scaler.step(optimizer)
                 scaler.update()
                 lr_scheduler.step()
@@ -232,6 +237,9 @@ def main():
                 total_loss += loss.item()
                 batches += 1
                 print('loss: {:.5f}'.format(total_loss / batches), end='\r')
+
+                if step_count % print_every == 0:
+                    print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))
 
                 # save every N steps
                 if step_count != start_step and step_count % save_every == 0:
