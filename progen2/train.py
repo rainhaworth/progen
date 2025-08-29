@@ -153,7 +153,7 @@ def main():
         
         # optimizer ends up on cpu if we don't declare after model.to(device)
         model.to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=4e-4)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
         if states is not None: optimizer.load_state_dict(states['optim_state'])
 
 
