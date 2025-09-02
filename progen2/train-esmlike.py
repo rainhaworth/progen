@@ -193,11 +193,18 @@ def main():
 
     step_count = 0
     save_every = args.save_every
+    print_every = 1000
     for epoch in range(num_epochs):
         with print_time('\nepoch ' + str(epoch)):
             total_loss = 0
             batches = 0
             for seqs_gt, seqs_masked in train_dataloader:
+                # resume from step
+                if step_count < start_step:
+                    step_count += 1
+                    lr_scheduler.step()
+                    continue
+
                 # put everything on the GPU
                 seqs_gt = seqs_gt.to(device)
                 seqs_masked = seqs_masked.to(device)
@@ -224,6 +231,9 @@ def main():
                 total_loss += loss.item()
                 batches += 1
                 print('loss: {:.5f}'.format(total_loss / batches), end='\r')
+
+                if step_count % print_every == 0:
+                    print('step {} loss: {:.5f} (this step {:.5f})'.format(step_count, total_loss / batches, loss.item()))
                 
                 # save every N steps
                 if step_count != start_step and step_count % save_every == 0:
